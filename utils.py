@@ -3,6 +3,7 @@ import sqlite3
 import logging
 import asyncio
 import shutil
+import subprocess
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -32,9 +33,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 ALLOWED_TYPES = {
-    'audio': ['.mp3', '.m4a', '.aac', '.wav', '.ogg'],
-    'video': ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv'],
-    'image': ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff']
+    'audio': ['.mp3', '.m4a', '.aac', '.wav', '.ogg', '.flac'],
+    'video': ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.3gp', '.m4v', '.mpg', '.mpeg'],
+    'image': ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff', '.ico']
 }
 
 cache = TTLCache(maxsize=1000, ttl=300)
@@ -50,12 +51,8 @@ class DatabaseManager:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 
-                cursor.execute("DROP TABLE IF EXISTS users")
-                cursor.execute("DROP TABLE IF EXISTS files")
-                cursor.execute("DROP TABLE IF EXISTS stats")
-                
                 cursor.execute('''
-                    CREATE TABLE users (
+                    CREATE TABLE IF NOT EXISTS users (
                         user_id INTEGER PRIMARY KEY,
                         first_name TEXT,
                         join_date TEXT,
@@ -64,7 +61,7 @@ class DatabaseManager:
                 ''')
                 
                 cursor.execute('''
-                    CREATE TABLE files (
+                    CREATE TABLE IF NOT EXISTS files (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         user_id INTEGER,
                         title TEXT,
@@ -78,7 +75,7 @@ class DatabaseManager:
                 ''')
                 
                 cursor.execute('''
-                    CREATE TABLE stats (
+                    CREATE TABLE IF NOT EXISTS stats (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         date TEXT,
                         total_audio INTEGER DEFAULT 0,
@@ -88,8 +85,8 @@ class DatabaseManager:
                     )
                 ''')
                 
-                cursor.execute('CREATE INDEX idx_files_user_id ON files(user_id)')
-                cursor.execute('CREATE INDEX idx_files_date ON files(date)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_files_user_id ON files(user_id)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_files_date ON files(date)')
                 
                 conn.commit()
                 logger.info("تم تهيئة قاعدة البيانات بنجاح")
@@ -175,17 +172,41 @@ class FileValidator:
                 return False, f"نوع الملف غير مدعوم: {file_ext}"
             
             try:
-                import subprocess
-                cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", 
-                       "-of", "default=noprint_wrappers=1:nokey=1", file_path]
+                cmd = [
+                    "ffprobe",
+                    "-v", "error",
+                    "-select_streams", "a:0",
+                    "-show_entries", "stream=codec_type",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    file_path
+                ]
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-                if result.returncode == 0 and result.stdout.strip():
-                    duration = float(result.stdout.strip())
+                has_audio = "audio" in result.stdout
+                
+                if not has_audio:
+                    return False, "الفيديو لا يحتوي على صوت"
+                
+                cmd_duration = [
+                    "ffprobe",
+                    "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    file_path
+                ]
+                result_duration = subprocess.run(cmd_duration, capture_output=True, text=True, timeout=10)
+                
+                if result_duration.returncode == 0 and result_duration.stdout.strip():
+                    duration = float(result_duration.stdout.strip())
                     if duration > 0:
                         return True, f"فيديو صالح - المدة: {int(duration)} ثانية"
-                return False, "فيديو تالف أو لا يحتوي على صوت"
-            except:
+                
                 return True, "فيديو صالح"
+                
+            except subprocess.TimeoutExpired:
+                return True, "فيديو صالح (تعذر التحقق)"
+            except Exception as e:
+                logger.warning(f"خطأ في ffprobe: {e}")
+                return True, "فيديو صالح (تحقق محدود)"
                 
         except Exception as e:
             logger.error(f"خطأ في التحقق من الفيديو: {e}")
@@ -251,10 +272,12 @@ class AudioProcessor:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            await process.communicate()
+            stdout, stderr = await process.communicate()
             
             if process.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 return output_path
+            
+            logger.error(f"خطأ في FFmpeg: {stderr.decode()}")
             return None
             
         except Exception as e:
@@ -263,9 +286,16 @@ class AudioProcessor:
     
     async def extract_audio_from_video(self, video_path: str, quality: str = "192k") -> Optional[str]:
         try:
-            is_valid, _ = FileValidator.validate_video_file(video_path)
-            if not is_valid:
+            if not os.path.exists(video_path):
+                logger.error("الملف غير موجود")
                 return None
+            
+            file_size = os.path.getsize(video_path)
+            if file_size == 0:
+                logger.error("الملف فارغ")
+                return None
+            
+            logger.info(f"بدء استخراج الصوت من: {video_path} - الحجم: {file_size} بايت")
             
             timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
             output_path = os.path.join(self.temp_dir, f"extracted_{timestamp}.mp3")
@@ -283,15 +313,68 @@ class AudioProcessor:
                 output_path
             ]
             
+            logger.info(f"تشغيل أمر FFmpeg: {' '.join(cmd)}")
+            
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            await process.communicate()
+            
+            stdout, stderr = await process.communicate()
             
             if process.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                logger.info(f"تم استخراج الصوت بنجاح: {output_path} - الحجم: {os.path.getsize(output_path)}")
                 return output_path
+            
+            logger.warning("المحاولة الأولى فشلت، جاري المحاولة بجودة أقل")
+            
+            cmd2 = [
+                "ffmpeg",
+                "-i", video_path,
+                "-vn",
+                "-acodec", "libmp3lame",
+                "-ac", "2",
+                "-b:a", "128k",
+                "-ar", "22050",
+                "-f", "mp3",
+                "-y",
+                output_path
+            ]
+            
+            process2 = await asyncio.create_subprocess_exec(
+                *cmd2,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout2, stderr2 = await process2.communicate()
+            
+            if process2.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                logger.info(f"تم استخراج الصوت بنجاح (جودة منخفضة): {output_path}")
+                return output_path
+            
+            logger.warning("المحاولة الثانية فشلت، جاري المحاولة باستخدام pydub")
+            
+            try:
+                from pydub import AudioSegment
+                audio = AudioSegment.from_file(video_path)
+                if len(audio) > 0:
+                    audio.export(output_path, format="mp3", bitrate=quality)
+                    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                        logger.info(f"تم استخراج الصوت باستخدام pydub: {output_path}")
+                        return output_path
+            except Exception as e:
+                logger.error(f"فشل استخراج الصوت باستخدام pydub: {e}")
+            
+            logger.error(f"فشل استخراج الصوت من الفيديو: {stderr.decode() if stderr else 'خطأ غير معروف'}")
+            
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                except:
+                    pass
+            
             return None
             
         except Exception as e:
@@ -300,7 +383,7 @@ class AudioProcessor:
     
     def add_metadata(self, audio_path: str, title: str, artist: str, cover_path: str = None) -> bool:
         try:
-            from mutagen.id3 import ID3, TIT2, TPE1, APIC, TALB, TDRC
+            from mutagen.id3 import ID3, TIT2, TPE1, APIC, TALB, TDRC, TCON
             
             try:
                 audio = ID3(audio_path)
@@ -311,6 +394,7 @@ class AudioProcessor:
             audio["TPE1"] = TPE1(encoding=3, text=artist[:100])
             audio["TALB"] = TALB(encoding=3, text=f"@{CHANNEL_USERNAME}")
             audio["TDRC"] = TDRC(encoding=3, text=str(datetime.now().year))
+            audio["TCON"] = TCON(encoding=3, text="Various")
             
             if cover_path and os.path.exists(cover_path):
                 try:
@@ -324,8 +408,8 @@ class AudioProcessor:
                             desc="Cover",
                             data=img.read()
                         )
-                except:
-                    pass
+                except Exception as e:
+                    logger.warning(f"فشل إضافة الصورة: {e}")
             
             audio.save(audio_path, v2_version=3)
             return True
@@ -345,33 +429,63 @@ class FileManager:
             timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
             safe_name = f"{prefix}_{timestamp}_{file_obj.file_id[:8]}"
             
-            if hasattr(file_obj, 'file_name') and file_obj.file_name:
-                ext = os.path.splitext(file_obj.file_name)[1]
-            else:
-                if hasattr(file_obj, 'mime_type'):
-                    if 'audio' in file_obj.mime_type:
-                        ext = '.mp3'
-                    elif 'video' in file_obj.mime_type:
-                        ext = '.mp4'
-                    elif 'image' in file_obj.mime_type:
-                        ext = '.jpg'
-                    else:
-                        ext = '.bin'
-                else:
-                    ext = '.bin'
-            
+            ext = self._get_extension(file_obj)
             file_path = os.path.join(self.temp_dir, f"{safe_name}{ext}")
             
             tg_file = await file_obj.get_file()
             await tg_file.download_to_drive(file_path)
             
             if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                logger.info(f"تم تحميل الملف: {os.path.basename(file_path)} - الحجم: {os.path.getsize(file_path)} بايت")
                 return file_path
+            
+            logger.error(f"فشل تحميل الملف: {file_path}")
             return None
             
         except Exception as e:
             logger.error(f"خطأ في تحميل الملف: {e}")
             return None
+    
+    def _get_extension(self, file_obj) -> str:
+        if hasattr(file_obj, 'file_name') and file_obj.file_name:
+            ext = os.path.splitext(file_obj.file_name)[1]
+            if ext:
+                return ext
+        
+        if hasattr(file_obj, 'mime_type') and file_obj.mime_type:
+            mime = file_obj.mime_type
+            if 'video/mp4' in mime:
+                return '.mp4'
+            elif 'video/quicktime' in mime:
+                return '.mov'
+            elif 'video/x-msvideo' in mime:
+                return '.avi'
+            elif 'video/x-matroska' in mime:
+                return '.mkv'
+            elif 'video/webm' in mime:
+                return '.webm'
+            elif 'video/flv' in mime:
+                return '.flv'
+            elif 'audio/mpeg' in mime or 'audio/mp3' in mime:
+                return '.mp3'
+            elif 'audio/m4a' in mime:
+                return '.m4a'
+            elif 'image/jpeg' in mime:
+                return '.jpg'
+            elif 'image/png' in mime:
+                return '.png'
+            elif 'image/webp' in mime:
+                return '.webp'
+            elif 'image/gif' in mime:
+                return '.gif'
+        
+        if hasattr(file_obj, 'duration') and hasattr(file_obj, 'width') and hasattr(file_obj, 'height'):
+            return '.mp4'
+        
+        if hasattr(file_obj, 'duration') and hasattr(file_obj, 'performer'):
+            return '.mp3'
+        
+        return '.bin'
     
     def cleanup(self, max_age_seconds: int = 3600):
         try:
@@ -407,7 +521,7 @@ db_manager = DatabaseManager()
 async def is_maintenance(update, context) -> bool:
     if MAINTENANCE_MODE and update.effective_user.id != OWNER_ID:
         await update.effective_message.reply_text(
-            "عذراً، البوت في وضع الصيانة حاليا!\n\nنحن نقوم بتحسين الخدمة، سنعود للعمل قريبا."
+            "عذراً، البوت في وضع الصيانة حالياً!\n\nنحن نقوم بتحسين الخدمة، سنعود للعمل قريباً."
         )
         return True
     return False
