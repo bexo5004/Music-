@@ -1,5 +1,3 @@
-# utils.py - نسخة نهائية بدون import magic
-
 import os
 import sqlite3
 import logging
@@ -14,43 +12,35 @@ from cachetools import TTLCache
 from telegram.ext import ContextTypes
 from dotenv import load_dotenv
 
-# تحميل متغيرات البيئة
 load_dotenv()
 
-# ============ الإعدادات الأساسية ============
 DB_FILE = "bot_stats.db"
 MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", 100 * 1024 * 1024))
 DEFAULT_AUDIO_QUALITY = os.getenv("DEFAULT_QUALITY", "192k")
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "BEXO50")
 OWNER_ID = int(os.getenv("OWNER_ID", 8798182716))
 
-# مجلد الملفات المؤقتة
 TEMP_DIR = os.path.join(os.getcwd(), "temp_files")
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 MAINTENANCE_MODE = False
 
-# إعداد التسجيل
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# أنواع الملفات المسموحة
 ALLOWED_TYPES = {
     'audio': ['.mp3', '.m4a', '.aac', '.wav', '.ogg'],
-    'video': ['.mp4', '.mov', '.avi', '.mkv', '.webm'],
-    'image': ['.jpg', '.jpeg', '.png', '.webp', '.gif']
+    'video': ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv'],
+    'image': ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff']
 }
 
-# التخزين المؤقت
 cache = TTLCache(maxsize=1000, ttl=300)
 
 
 class DatabaseManager:
-    """مدير قاعدة البيانات"""
-    
     def __init__(self, db_path: str = DB_FILE):
         self.db_path = db_path
         self._init_db()
@@ -59,23 +49,26 @@ class DatabaseManager:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
+                
+                cursor.execute("DROP TABLE IF EXISTS users")
+                cursor.execute("DROP TABLE IF EXISTS files")
+                cursor.execute("DROP TABLE IF EXISTS stats")
+                
                 cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS users (
+                    CREATE TABLE users (
                         user_id INTEGER PRIMARY KEY,
                         first_name TEXT,
-                        username TEXT,
                         join_date TEXT,
-                        last_active TEXT,
-                        role TEXT DEFAULT 'user'
+                        last_active TEXT
                     )
                 ''')
+                
                 cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS files (
+                    CREATE TABLE files (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         user_id INTEGER,
                         title TEXT,
                         artist TEXT,
-                        file_name TEXT,
                         file_size INTEGER,
                         duration INTEGER,
                         quality TEXT,
@@ -83,8 +76,9 @@ class DatabaseManager:
                         status TEXT DEFAULT 'success'
                     )
                 ''')
+                
                 cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS stats (
+                    CREATE TABLE stats (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         date TEXT,
                         total_audio INTEGER DEFAULT 0,
@@ -93,13 +87,15 @@ class DatabaseManager:
                         total_errors INTEGER DEFAULT 0
                     )
                 ''')
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_files_user_id ON files(user_id)')
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_files_date ON files(date)')
-                cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_last_active ON users(last_active)')
+                
+                cursor.execute('CREATE INDEX idx_files_user_id ON files(user_id)')
+                cursor.execute('CREATE INDEX idx_files_date ON files(date)')
+                
                 conn.commit()
-                logger.info("✅ تم تهيئة قاعدة البيانات")
+                logger.info("تم تهيئة قاعدة البيانات بنجاح")
+                
         except Exception as e:
-            logger.error(f"❌ خطأ في تهيئة قاعدة البيانات: {e}")
+            logger.error(f"خطأ في تهيئة قاعدة البيانات: {e}")
     
     def execute_query(self, query: str, params: tuple = ()) -> List[tuple]:
         try:
@@ -108,7 +104,7 @@ class DatabaseManager:
                 cursor.execute(query, params)
                 return cursor.fetchall()
         except Exception as e:
-            logger.error(f"❌ خطأ في الاستعلام: {e}")
+            logger.error(f"خطأ في الاستعلام: {e}")
             return []
     
     def execute_update(self, query: str, params: tuple = ()) -> bool:
@@ -119,17 +115,14 @@ class DatabaseManager:
                 conn.commit()
                 return True
         except Exception as e:
-            logger.error(f"❌ خطأ في التحديث: {e}")
+            logger.error(f"خطأ في التحديث: {e}")
             return False
 
 
 class FileValidator:
-    """التحقق من صحة الملفات - بدون python-magic"""
-    
     @staticmethod
     def validate_audio_file(file_path: str) -> Tuple[bool, str]:
         try:
-            # التحقق من الوجود والحجم
             if not os.path.exists(file_path):
                 return False, "الملف غير موجود"
             
@@ -139,12 +132,10 @@ class FileValidator:
             if file_size > MAX_FILE_SIZE:
                 return False, f"حجم الملف كبير جداً (الحد: {MAX_FILE_SIZE // (1024*1024)}MB)"
             
-            # التحقق من الامتداد
             file_ext = os.path.splitext(file_path)[1].lower()
             if file_ext not in ALLOWED_TYPES['audio']:
                 return False, f"نوع الملف غير مدعوم: {file_ext}"
             
-            # التحقق باستخدام mutagen
             try:
                 from mutagen.mp3 import MP3
                 audio = MP3(file_path)
@@ -152,20 +143,19 @@ class FileValidator:
                     return False, "مدة الملف قصيرة جداً"
                 if audio.info.length > 3600:
                     return False, "مدة الملف طويلة جداً (أكثر من ساعة)"
-                return True, f"✅ ملف صالح - المدة: {int(audio.info.length)} ثانية"
+                return True, f"ملف صالح - المدة: {int(audio.info.length)} ثانية"
             except:
-                # محاولة مع pydub
                 try:
                     from pydub import AudioSegment
                     audio = AudioSegment.from_file(file_path)
                     if len(audio) < 1000:
                         return False, "مدة الملف قصيرة جداً"
-                    return True, f"✅ ملف صالح - المدة: {len(audio) // 1000} ثانية"
+                    return True, f"ملف صالح - المدة: {len(audio) // 1000} ثانية"
                 except:
-                    return True, "✅ ملف صالح (تعذر قراءة المدة)"
+                    return True, "ملف صالح (تعذر قراءة المدة)"
                     
         except Exception as e:
-            logger.error(f"❌ خطأ في التحقق من الملف: {e}")
+            logger.error(f"خطأ في التحقق من الملف: {e}")
             return False, f"حدث خطأ: {str(e)}"
     
     @staticmethod
@@ -192,13 +182,13 @@ class FileValidator:
                 if result.returncode == 0 and result.stdout.strip():
                     duration = float(result.stdout.strip())
                     if duration > 0:
-                        return True, f"✅ فيديو صالح - المدة: {int(duration)} ثانية"
+                        return True, f"فيديو صالح - المدة: {int(duration)} ثانية"
                 return False, "فيديو تالف أو لا يحتوي على صوت"
             except:
-                return True, "✅ فيديو صالح"
+                return True, "فيديو صالح"
                 
         except Exception as e:
-            logger.error(f"❌ خطأ في التحقق من الفيديو: {e}")
+            logger.error(f"خطأ في التحقق من الفيديو: {e}")
             return False, f"حدث خطأ: {str(e)}"
     
     @staticmethod
@@ -221,18 +211,16 @@ class FileValidator:
                 width, height = img.size
                 if width < 50 or height < 50:
                     return False, "الصورة صغيرة جداً"
-                return True, f"✅ صورة صالحة - الأبعاد: {width}x{height}"
+                return True, f"صورة صالحة - الأبعاد: {width}x{height}"
             except:
                 return False, "الصورة تالفة"
                 
         except Exception as e:
-            logger.error(f"❌ خطأ في التحقق من الصورة: {e}")
+            logger.error(f"خطأ في التحقق من الصورة: {e}")
             return False, f"حدث خطأ: {str(e)}"
 
 
 class AudioProcessor:
-    """معالج الصوت"""
-    
     def __init__(self):
         self.temp_dir = TEMP_DIR
     
@@ -242,12 +230,27 @@ class AudioProcessor:
             if not is_valid:
                 return None
             
-            output_path = os.path.join(self.temp_dir, f"output_{datetime.now().strftime('%Y%m%d%H%M%S')}.mp3")
+            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+            output_path = os.path.join(self.temp_dir, f"output_{timestamp}.mp3")
             
-            cmd = ["ffmpeg", "-i", input_path, "-vn", "-acodec", "libmp3lame",
-                   "-ac", "2", "-b:a", quality, "-ar", "44100", "-f", "mp3", "-y", output_path]
+            cmd = [
+                "ffmpeg",
+                "-i", input_path,
+                "-vn",
+                "-acodec", "libmp3lame",
+                "-ac", "2",
+                "-b:a", quality,
+                "-ar", "44100",
+                "-f", "mp3",
+                "-y",
+                output_path
+            ]
             
-            process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
             await process.communicate()
             
             if process.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
@@ -255,7 +258,7 @@ class AudioProcessor:
             return None
             
         except Exception as e:
-            logger.error(f"❌ خطأ في معالجة الصوت: {e}")
+            logger.error(f"خطأ في معالجة الصوت: {e}")
             return None
     
     async def extract_audio_from_video(self, video_path: str, quality: str = "192k") -> Optional[str]:
@@ -264,12 +267,27 @@ class AudioProcessor:
             if not is_valid:
                 return None
             
-            output_path = os.path.join(self.temp_dir, f"extracted_{datetime.now().strftime('%Y%m%d%H%M%S')}.mp3")
+            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+            output_path = os.path.join(self.temp_dir, f"extracted_{timestamp}.mp3")
             
-            cmd = ["ffmpeg", "-i", video_path, "-vn", "-acodec", "libmp3lame",
-                   "-ac", "2", "-b:a", quality, "-ar", "44100", "-f", "mp3", "-y", output_path]
+            cmd = [
+                "ffmpeg",
+                "-i", video_path,
+                "-vn",
+                "-acodec", "libmp3lame",
+                "-ac", "2",
+                "-b:a", quality,
+                "-ar", "44100",
+                "-f", "mp3",
+                "-y",
+                output_path
+            ]
             
-            process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
             await process.communicate()
             
             if process.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
@@ -277,7 +295,7 @@ class AudioProcessor:
             return None
             
         except Exception as e:
-            logger.error(f"❌ خطأ في استخراج الصوت: {e}")
+            logger.error(f"خطأ في استخراج الصوت: {e}")
             return None
     
     def add_metadata(self, audio_path: str, title: str, artist: str, cover_path: str = None) -> bool:
@@ -299,7 +317,13 @@ class AudioProcessor:
                     with open(cover_path, "rb") as img:
                         if "APIC" in audio:
                             del audio["APIC"]
-                        audio["APIC"] = APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=img.read())
+                        audio["APIC"] = APIC(
+                            encoding=3,
+                            mime="image/jpeg",
+                            type=3,
+                            desc="Cover",
+                            data=img.read()
+                        )
                 except:
                     pass
             
@@ -307,13 +331,11 @@ class AudioProcessor:
             return True
             
         except Exception as e:
-            logger.error(f"❌ خطأ في إضافة البيانات: {e}")
+            logger.error(f"خطأ في إضافة البيانات: {e}")
             return False
 
 
 class FileManager:
-    """مدير الملفات"""
-    
     def __init__(self):
         self.temp_dir = TEMP_DIR
         self.processor = AudioProcessor()
@@ -323,7 +345,6 @@ class FileManager:
             timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
             safe_name = f"{prefix}_{timestamp}_{file_obj.file_id[:8]}"
             
-            # تحديد الامتداد
             if hasattr(file_obj, 'file_name') and file_obj.file_name:
                 ext = os.path.splitext(file_obj.file_name)[1]
             else:
@@ -332,6 +353,8 @@ class FileManager:
                         ext = '.mp3'
                     elif 'video' in file_obj.mime_type:
                         ext = '.mp4'
+                    elif 'image' in file_obj.mime_type:
+                        ext = '.jpg'
                     else:
                         ext = '.bin'
                 else:
@@ -347,7 +370,7 @@ class FileManager:
             return None
             
         except Exception as e:
-            logger.error(f"❌ خطأ في تحميل الملف: {e}")
+            logger.error(f"خطأ في تحميل الملف: {e}")
             return None
     
     def cleanup(self, max_age_seconds: int = 3600):
@@ -363,31 +386,28 @@ class FileManager:
                         deleted += 1
             
             if deleted > 0:
-                logger.info(f"🧹 تم حذف {deleted} ملف مؤقت")
+                logger.info(f"تم حذف {deleted} ملف مؤقت")
                 
         except Exception as e:
-            logger.error(f"❌ خطأ في تنظيف الملفات: {e}")
+            logger.error(f"خطأ في تنظيف الملفات: {e}")
     
     def cleanup_all(self):
         try:
             shutil.rmtree(self.temp_dir)
             os.makedirs(self.temp_dir, exist_ok=True)
-            logger.info("🗑️ تم تنظيف جميع الملفات المؤقتة")
+            logger.info("تم تنظيف جميع الملفات المؤقتة")
         except Exception as e:
-            logger.error(f"❌ خطأ في تنظيف الملفات: {e}")
+            logger.error(f"خطأ في تنظيف الملفات: {e}")
 
 
-# ============ إنشاء المديرين ============
 file_manager = FileManager()
 db_manager = DatabaseManager()
 
 
-# ============ الوظائف الأساسية ============
-
 async def is_maintenance(update, context) -> bool:
     if MAINTENANCE_MODE and update.effective_user.id != OWNER_ID:
         await update.effective_message.reply_text(
-            "⚠️ **عذراً، البوت في وضع الصيانة حالياً!**\n\nنحن نقوم بتحسين الخدمة، سنعود للعمل قريباً. 🛠️"
+            "عذراً، البوت في وضع الصيانة حاليا!\n\nنحن نقوم بتحسين الخدمة، سنعود للعمل قريبا."
         )
         return True
     return False
@@ -405,7 +425,7 @@ async def check_subscription(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
                 cache[f"sub_{user_id}"] = False
                 return False
         except Exception as e:
-            logger.warning(f"⚠️ محاولة {attempt+1} فشلت: {e}")
+            logger.warning(f"محاولة {attempt+1} فشلت: {e}")
             await asyncio.sleep(1)
     
     return cache.get(f"sub_{user_id}", False)
@@ -421,20 +441,20 @@ def get_channel_cover() -> Optional[str]:
                 return cover_path
         return None
     except Exception as e:
-        logger.error(f"❌ خطأ في جلب صورة القناة: {e}")
+        logger.error(f"خطأ في جلب صورة القناة: {e}")
         return None
 
 
-def add_user(user_id: int, first_name: str, username: str = None):
+def add_user(user_id: int, first_name: str):
     try:
         db_manager.execute_update(
-            "INSERT OR REPLACE INTO users (user_id, first_name, username, join_date, last_active) VALUES (?, ?, ?, ?, ?)",
-            (user_id, first_name, username, datetime.now().strftime("%Y-%m-%d %H:%M"), 
+            "INSERT OR REPLACE INTO users (user_id, first_name, join_date, last_active) VALUES (?, ?, ?, ?)",
+            (user_id, first_name, datetime.now().strftime("%Y-%m-%d %H:%M"), 
              datetime.now().strftime("%Y-%m-%d %H:%M"))
         )
-        logger.info(f"✅ تم تسجيل المستخدم {user_id}")
+        logger.info(f"تم تسجيل المستخدم {user_id}")
     except Exception as e:
-        logger.error(f"❌ خطأ في إضافة المستخدم: {e}")
+        logger.error(f"خطأ في إضافة المستخدم: {e}")
 
 
 def add_file_record(user_id: int, title: str, artist: str, file_path: str = None, status: str = "success"):
@@ -451,14 +471,14 @@ def add_file_record(user_id: int, title: str, artist: str, file_path: str = None
                 pass
         
         db_manager.execute_update(
-            "INSERT INTO files (user_id, title, artist, file_name, file_size, duration, quality, date, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (user_id, title, artist, os.path.basename(file_path) if file_path else "", 
-             file_size, duration, DEFAULT_AUDIO_QUALITY, datetime.now().strftime("%Y-%m-%d %H:%M"), status)
+            "INSERT INTO files (user_id, title, artist, file_size, duration, quality, date, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, title, artist, file_size, duration, DEFAULT_AUDIO_QUALITY, 
+             datetime.now().strftime("%Y-%m-%d %H:%M"), status)
         )
-        logger.info(f"✅ تم تسجيل ملف جديد: {title} - {artist}")
+        logger.info(f"تم تسجيل ملف جديد: {title} - {artist}")
         return True
     except Exception as e:
-        logger.error(f"❌ خطأ في تسجيل الملف: {e}")
+        logger.error(f"خطأ في تسجيل الملف: {e}")
         return False
 
 
@@ -475,7 +495,7 @@ def get_user_stats(user_id: int) -> Dict:
             "last_activity": last_activity[0][0] if last_activity and last_activity[0][0] else "لا يوجد"
         }
     except Exception as e:
-        logger.error(f"❌ خطأ في جلب إحصائيات المستخدم: {e}")
+        logger.error(f"خطأ في جلب إحصائيات المستخدم: {e}")
         return {"files_count": 0, "last_activity": "خطأ"}
 
 
@@ -493,5 +513,5 @@ def get_total_stats() -> Dict:
             "active_today": active_today[0][0] if active_today else 0
         }
     except Exception as e:
-        logger.error(f"❌ خطأ في جلب الإحصائيات الكلية: {e}")
+        logger.error(f"خطأ في جلب الإحصائيات الكلية: {e}")
         return {"total_users": 0, "total_files": 0, "active_today": 0}
