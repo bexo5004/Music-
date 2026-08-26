@@ -1,3 +1,5 @@
+# utils.py - نسخة نهائية بدون import magic
+
 import os
 import sqlite3
 import logging
@@ -9,22 +11,23 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 from functools import lru_cache
 from cachetools import TTLCache
-import magic
 from telegram.ext import ContextTypes
 from dotenv import load_dotenv
 
 # تحميل متغيرات البيئة
 load_dotenv()
 
-# الإعدادات الأساسية
+# ============ الإعدادات الأساسية ============
 DB_FILE = "bot_stats.db"
-MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", 100 * 1024 * 1024))  # 100MB
+MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", 100 * 1024 * 1024))
 DEFAULT_AUDIO_QUALITY = os.getenv("DEFAULT_QUALITY", "192k")
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "BEXO50")
 OWNER_ID = int(os.getenv("OWNER_ID", 8798182716))
-TEMP_DIR = tempfile.mkdtemp(prefix="bot_temp_")
 
-# وضع الصيانة - استخدام متغير آمن
+# مجلد الملفات المؤقتة
+TEMP_DIR = os.path.join(os.getcwd(), "temp_files")
+os.makedirs(TEMP_DIR, exist_ok=True)
+
 MAINTENANCE_MODE = False
 
 # إعداد التسجيل
@@ -35,38 +38,27 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # أنواع الملفات المسموحة
-ALLOWED_MIME_TYPES = {
-    'audio': {
-        'mime': ['audio/mpeg', 'audio/mp3', 'audio/mp4', 'audio/x-m4a'],
-        'extensions': ['.mp3', '.m4a', '.aac', '.wav']
-    },
-    'video': {
-        'mime': ['video/mp4', 'video/quicktime', 'video/x-msvideo'],
-        'extensions': ['.mp4', '.mov', '.avi', '.mkv']
-    },
-    'image': {
-        'mime': ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],
-        'extensions': ['.jpg', '.jpeg', '.png', '.webp', '.gif']
-    }
+ALLOWED_TYPES = {
+    'audio': ['.mp3', '.m4a', '.aac', '.wav', '.ogg'],
+    'video': ['.mp4', '.mov', '.avi', '.mkv', '.webm'],
+    'image': ['.jpg', '.jpeg', '.png', '.webp', '.gif']
 }
 
 # التخزين المؤقت
 cache = TTLCache(maxsize=1000, ttl=300)
 
+
 class DatabaseManager:
-    """مدير قاعدة البيانات المحسن"""
+    """مدير قاعدة البيانات"""
     
     def __init__(self, db_path: str = DB_FILE):
         self.db_path = db_path
         self._init_db()
     
     def _init_db(self):
-        """تهيئة قاعدة البيانات"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                
-                # جدول المستخدمين
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS users (
                         user_id INTEGER PRIMARY KEY,
@@ -77,8 +69,6 @@ class DatabaseManager:
                         role TEXT DEFAULT 'user'
                     )
                 ''')
-                
-                # جدول الملفات
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS files (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,8 +83,6 @@ class DatabaseManager:
                         status TEXT DEFAULT 'success'
                     )
                 ''')
-                
-                # جدول الإحصائيات
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS stats (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,31 +93,25 @@ class DatabaseManager:
                         total_errors INTEGER DEFAULT 0
                     )
                 ''')
-                
-                # إضافة فهارس
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_files_user_id ON files(user_id)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_files_date ON files(date)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_last_active ON users(last_active)')
-                
                 conn.commit()
-                logger.info("✅ تم تهيئة قاعدة البيانات بنجاح")
-                
+                logger.info("✅ تم تهيئة قاعدة البيانات")
         except Exception as e:
             logger.error(f"❌ خطأ في تهيئة قاعدة البيانات: {e}")
     
     def execute_query(self, query: str, params: tuple = ()) -> List[tuple]:
-        """تنفيذ استعلام والعودة بالنتائج"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute(query, params)
                 return cursor.fetchall()
         except Exception as e:
-            logger.error(f"❌ خطأ في تنفيذ الاستعلام: {e}")
+            logger.error(f"❌ خطأ في الاستعلام: {e}")
             return []
     
     def execute_update(self, query: str, params: tuple = ()) -> bool:
-        """تنفيذ تحديث في قاعدة البيانات"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
@@ -137,38 +119,37 @@ class DatabaseManager:
                 conn.commit()
                 return True
         except Exception as e:
-            logger.error(f"❌ خطأ في تحديث البيانات: {e}")
+            logger.error(f"❌ خطأ في التحديث: {e}")
             return False
 
+
 class FileValidator:
-    """مدير التحقق من صحة الملفات"""
+    """التحقق من صحة الملفات - بدون python-magic"""
     
     @staticmethod
     def validate_audio_file(file_path: str) -> Tuple[bool, str]:
-        """التحقق من صحة الملف الصوتي"""
         try:
-            # التحقق من الوجود
+            # التحقق من الوجود والحجم
             if not os.path.exists(file_path):
                 return False, "الملف غير موجود"
             
-            # التحقق من الحجم
             file_size = os.path.getsize(file_path)
             if file_size == 0:
                 return False, "الملف فارغ"
             if file_size > MAX_FILE_SIZE:
-                return False, f"حجم الملف كبير جداً (الحد الأقصى: {MAX_FILE_SIZE // (1024*1024)}MB)"
+                return False, f"حجم الملف كبير جداً (الحد: {MAX_FILE_SIZE // (1024*1024)}MB)"
             
-            # التحقق من نوع الملف
-            mime = magic.from_file(file_path, mime=True)
-            if mime not in ALLOWED_MIME_TYPES['audio']['mime']:
-                return False, f"نوع الملف غير مدعوم: {mime}"
+            # التحقق من الامتداد
+            file_ext = os.path.splitext(file_path)[1].lower()
+            if file_ext not in ALLOWED_TYPES['audio']:
+                return False, f"نوع الملف غير مدعوم: {file_ext}"
             
-            # التحقق من إمكانية قراءة الملف
+            # التحقق باستخدام mutagen
             try:
                 from mutagen.mp3 import MP3
                 audio = MP3(file_path)
                 if audio.info.length < 1:
-                    return False, "مدة الملف قصيرة جداً (أقل من ثانية)"
+                    return False, "مدة الملف قصيرة جداً"
                 if audio.info.length > 3600:
                     return False, "مدة الملف طويلة جداً (أكثر من ساعة)"
                 return True, f"✅ ملف صالح - المدة: {int(audio.info.length)} ثانية"
@@ -180,16 +161,15 @@ class FileValidator:
                     if len(audio) < 1000:
                         return False, "مدة الملف قصيرة جداً"
                     return True, f"✅ ملف صالح - المدة: {len(audio) // 1000} ثانية"
-                except Exception as e:
-                    return False, f"الملف تالف أو غير صالح: {str(e)}"
+                except:
+                    return True, "✅ ملف صالح (تعذر قراءة المدة)"
                     
         except Exception as e:
             logger.error(f"❌ خطأ في التحقق من الملف: {e}")
-            return False, f"حدث خطأ أثناء التحقق: {str(e)}"
+            return False, f"حدث خطأ: {str(e)}"
     
     @staticmethod
     def validate_video_file(file_path: str) -> Tuple[bool, str]:
-        """التحقق من صحة ملف الفيديو"""
         try:
             if not os.path.exists(file_path):
                 return False, "الملف غير موجود"
@@ -198,36 +178,31 @@ class FileValidator:
             if file_size == 0:
                 return False, "الملف فارغ"
             if file_size > MAX_FILE_SIZE:
-                return False, f"حجم الملف كبير جداً (الحد الأقصى: {MAX_FILE_SIZE // (1024*1024)}MB)"
+                return False, f"حجم الملف كبير جداً (الحد: {MAX_FILE_SIZE // (1024*1024)}MB)"
             
-            mime = magic.from_file(file_path, mime=True)
-            if mime not in ALLOWED_MIME_TYPES['video']['mime']:
-                return False, f"نوع الملف غير مدعوم: {mime}"
+            file_ext = os.path.splitext(file_path)[1].lower()
+            if file_ext not in ALLOWED_TYPES['video']:
+                return False, f"نوع الملف غير مدعوم: {file_ext}"
             
-            # التحقق من الفيديو باستخدام ffprobe
             try:
                 import subprocess
-                cmd = [
-                    "ffprobe", "-v", "error", "-show_entries",
-                    "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
-                    file_path
-                ]
-                result = subprocess.run(cmd, capture_output=True, text=True)
+                cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", 
+                       "-of", "default=noprint_wrappers=1:nokey=1", file_path]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
                 if result.returncode == 0 and result.stdout.strip():
                     duration = float(result.stdout.strip())
                     if duration > 0:
                         return True, f"✅ فيديو صالح - المدة: {int(duration)} ثانية"
                 return False, "فيديو تالف أو لا يحتوي على صوت"
             except:
-                return True, "✅ فيديو صالح (تعذر قراءة المدة)"
+                return True, "✅ فيديو صالح"
                 
         except Exception as e:
             logger.error(f"❌ خطأ في التحقق من الفيديو: {e}")
-            return False, f"حدث خطأ أثناء التحقق: {str(e)}"
+            return False, f"حدث خطأ: {str(e)}"
     
     @staticmethod
     def validate_image_file(file_path: str) -> Tuple[bool, str]:
-        """التحقق من صحة ملف الصورة"""
         try:
             if not os.path.exists(file_path):
                 return False, "الملف غير موجود"
@@ -236,76 +211,47 @@ class FileValidator:
             if file_size == 0:
                 return False, "الملف فارغ"
             
-            mime = magic.from_file(file_path, mime=True)
-            if mime not in ALLOWED_MIME_TYPES['image']['mime']:
-                return False, f"نوع الصورة غير مدعوم: {mime}"
+            file_ext = os.path.splitext(file_path)[1].lower()
+            if file_ext not in ALLOWED_TYPES['image']:
+                return False, f"نوع الصورة غير مدعوم: {file_ext}"
             
-            # التحقق من الصورة باستخدام PIL
             try:
                 from PIL import Image
                 img = Image.open(file_path)
                 width, height = img.size
                 if width < 50 or height < 50:
-                    return False, "الصورة صغيرة جداً (أقل من 50x50 بكسل)"
+                    return False, "الصورة صغيرة جداً"
                 return True, f"✅ صورة صالحة - الأبعاد: {width}x{height}"
             except:
                 return False, "الصورة تالفة"
                 
         except Exception as e:
             logger.error(f"❌ خطأ في التحقق من الصورة: {e}")
-            return False, f"حدث خطأ أثناء التحقق: {str(e)}"
+            return False, f"حدث خطأ: {str(e)}"
+
 
 class AudioProcessor:
-    """معالج الصوت المحسن"""
+    """معالج الصوت"""
     
     def __init__(self):
-        self.temp_dir = tempfile.mkdtemp(prefix="audio_processor_")
-        self.validator = FileValidator()
+        self.temp_dir = TEMP_DIR
     
     async def process_audio(self, input_path: str, quality: str = "192k") -> Optional[str]:
-        """معالجة الصوت وتحسين الجودة"""
         try:
-            # التحقق من الملف
-            is_valid, message = self.validator.validate_audio_file(input_path)
+            is_valid, _ = FileValidator.validate_audio_file(input_path)
             if not is_valid:
-                logger.error(f"❌ {message}")
                 return None
             
-            # إنشاء مسار الإخراج
-            output_path = os.path.join(
-                self.temp_dir,
-                f"output_{datetime.now().strftime('%Y%m%d%H%M%S')}.mp3"
-            )
+            output_path = os.path.join(self.temp_dir, f"output_{datetime.now().strftime('%Y%m%d%H%M%S')}.mp3")
             
-            # تشغيل FFmpeg مع معلمات محسنة
-            cmd = [
-                "ffmpeg", "-i", input_path,
-                "-vn",  # إزالة الفيديو
-                "-acodec", "libmp3lame",
-                "-ac", "2",  # ستيريو
-                "-b:a", quality,
-                "-ar", "44100",  # تردد ثابت
-                "-f", "mp3",
-                "-y",  # استبدال الملف
-                output_path
-            ]
+            cmd = ["ffmpeg", "-i", input_path, "-vn", "-acodec", "libmp3lame",
+                   "-ac", "2", "-b:a", quality, "-ar", "44100", "-f", "mp3", "-y", output_path]
             
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
+            process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            await process.communicate()
             
-            stdout, stderr = await process.communicate()
-            
-            if process.returncode != 0:
-                logger.error(f"❌ خطأ في FFmpeg: {stderr.decode()}")
-                return None
-            
-            # التحقق من الملف الناتج
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            if process.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 return output_path
-            
             return None
             
         except Exception as e:
@@ -313,52 +259,21 @@ class AudioProcessor:
             return None
     
     async def extract_audio_from_video(self, video_path: str, quality: str = "192k") -> Optional[str]:
-        """استخراج الصوت من الفيديو"""
         try:
-            # التحقق من الفيديو
-            is_valid, message = self.validator.validate_video_file(video_path)
+            is_valid, _ = FileValidator.validate_video_file(video_path)
             if not is_valid:
-                logger.error(f"❌ {message}")
                 return None
             
-            # إنشاء مسار الإخراج
-            output_path = os.path.join(
-                self.temp_dir,
-                f"extracted_{datetime.now().strftime('%Y%m%d%H%M%S')}.mp3"
-            )
+            output_path = os.path.join(self.temp_dir, f"extracted_{datetime.now().strftime('%Y%m%d%H%M%S')}.mp3")
             
-            # تشغيل FFmpeg لاستخراج الصوت
-            cmd = [
-                "ffmpeg", "-i", video_path,
-                "-vn",  # إزالة الفيديو
-                "-acodec", "libmp3lame",
-                "-ac", "2",
-                "-b:a", quality,
-                "-ar", "44100",
-                "-f", "mp3",
-                "-y",
-                output_path
-            ]
+            cmd = ["ffmpeg", "-i", video_path, "-vn", "-acodec", "libmp3lame",
+                   "-ac", "2", "-b:a", quality, "-ar", "44100", "-f", "mp3", "-y", output_path]
             
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
+            process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            await process.communicate()
             
-            stdout, stderr = await process.communicate()
-            
-            if process.returncode != 0:
-                logger.error(f"❌ خطأ في استخراج الصوت: {stderr.decode()}")
-                return None
-            
-            # التحقق من الملف الناتج
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                # إعادة التحقق من الصوت
-                is_valid, _ = self.validator.validate_audio_file(output_path)
-                if is_valid:
-                    return output_path
-            
+            if process.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                return output_path
             return None
             
         except Exception as e:
@@ -366,77 +281,56 @@ class AudioProcessor:
             return None
     
     def add_metadata(self, audio_path: str, title: str, artist: str, cover_path: str = None) -> bool:
-        """إضافة البيانات الوصفية للملف الصوتي"""
         try:
-            from mutagen.id3 import ID3, TIT2, TPE1, APIC, TALB, TDRC, TRCK
+            from mutagen.id3 import ID3, TIT2, TPE1, APIC, TALB, TDRC
             
-            # فتح أو إنشاء علامات ID3
             try:
                 audio = ID3(audio_path)
             except:
                 audio = ID3()
             
-            # إضافة العنوان والفنان
             audio["TIT2"] = TIT2(encoding=3, text=title[:100])
             audio["TPE1"] = TPE1(encoding=3, text=artist[:100])
-            
-            # إضافة ألبوم (اسم القناة)
             audio["TALB"] = TALB(encoding=3, text=f"@{CHANNEL_USERNAME}")
+            audio["TDRC"] = TDRC(encoding=3, text=str(datetime.now().year))
             
-            # إضافة السنة
-            audio["TDRC"] = TDRC(encoding=3, text=datetime.now().year)
-            
-            # إضافة صورة الغلاف
             if cover_path and os.path.exists(cover_path):
-                # التحقق من الصورة
-                is_valid, _ = FileValidator.validate_image_file(cover_path)
-                if is_valid:
+                try:
                     with open(cover_path, "rb") as img:
-                        # تحديد نوع الصورة
-                        mime = magic.from_file(cover_path, mime=True)
                         if "APIC" in audio:
                             del audio["APIC"]
-                        audio["APIC"] = APIC(
-                            encoding=3,
-                            mime=mime or "image/jpeg",
-                            type=3,  # غلاف أمامي
-                            desc="Cover",
-                            data=img.read()
-                        )
+                        audio["APIC"] = APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=img.read())
+                except:
+                    pass
             
-            # حفظ العلامات
             audio.save(audio_path, v2_version=3)
             return True
             
         except Exception as e:
-            logger.error(f"❌ خطأ في إضافة البيانات الوصفية: {e}")
+            logger.error(f"❌ خطأ في إضافة البيانات: {e}")
             return False
 
+
 class FileManager:
-    """مدير الملفات المحسن"""
+    """مدير الملفات"""
     
     def __init__(self):
-        self.temp_dir = tempfile.mkdtemp(prefix="bot_files_")
+        self.temp_dir = TEMP_DIR
         self.processor = AudioProcessor()
-        self.validator = FileValidator()
     
     async def download_file(self, file_obj, prefix: str = "") -> Optional[str]:
-        """تحميل الملف مع التحقق"""
         try:
-            # إنشاء مسار آمن
             timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
             safe_name = f"{prefix}_{timestamp}_{file_obj.file_id[:8]}"
             
-            # تحديد الامتداد المناسب
+            # تحديد الامتداد
             if hasattr(file_obj, 'file_name') and file_obj.file_name:
                 ext = os.path.splitext(file_obj.file_name)[1]
             else:
-                # تحديد الامتداد من نوع الملف
                 if hasattr(file_obj, 'mime_type'):
-                    mime = file_obj.mime_type
-                    if 'audio' in mime:
+                    if 'audio' in file_obj.mime_type:
                         ext = '.mp3'
-                    elif 'video' in mime:
+                    elif 'video' in file_obj.mime_type:
                         ext = '.mp4'
                     else:
                         ext = '.bin'
@@ -445,14 +339,11 @@ class FileManager:
             
             file_path = os.path.join(self.temp_dir, f"{safe_name}{ext}")
             
-            # تحميل الملف
             tg_file = await file_obj.get_file()
             await tg_file.download_to_drive(file_path)
             
-            # التحقق من نجاح التحميل
             if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
                 return file_path
-            
             return None
             
         except Exception as e:
@@ -460,7 +351,6 @@ class FileManager:
             return None
     
     def cleanup(self, max_age_seconds: int = 3600):
-        """تنظيف الملفات القديمة"""
         try:
             current_time = datetime.now().timestamp()
             deleted = 0
@@ -479,96 +369,78 @@ class FileManager:
             logger.error(f"❌ خطأ في تنظيف الملفات: {e}")
     
     def cleanup_all(self):
-        """حذف جميع الملفات المؤقتة"""
         try:
             shutil.rmtree(self.temp_dir)
             os.makedirs(self.temp_dir, exist_ok=True)
             logger.info("🗑️ تم تنظيف جميع الملفات المؤقتة")
         except Exception as e:
-            logger.error(f"❌ خطأ في تنظيف جميع الملفات: {e}")
+            logger.error(f"❌ خطأ في تنظيف الملفات: {e}")
 
-# إنشاء مدير الملفات العام
+
+# ============ إنشاء المديرين ============
 file_manager = FileManager()
 db_manager = DatabaseManager()
 
-# ============================================
-# الوظائف الأساسية المحسنة
-# ============================================
+
+# ============ الوظائف الأساسية ============
 
 async def is_maintenance(update, context) -> bool:
-    """التحقق من وضع الصيانة"""
     if MAINTENANCE_MODE and update.effective_user.id != OWNER_ID:
         await update.effective_message.reply_text(
-            "⚠️ **عذراً، البوت في وضع الصيانة حالياً!**\n\n"
-            "نحن نقوم بتحسين الخدمة، سنعود للعمل قريباً. 🛠️"
+            "⚠️ **عذراً، البوت في وضع الصيانة حالياً!**\n\nنحن نقوم بتحسين الخدمة، سنعود للعمل قريباً. 🛠️"
         )
         return True
     return False
 
+
 async def check_subscription(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """التحقق من الاشتراك مع إعادة المحاولة"""
     for attempt in range(3):
         try:
             member = await context.bot.get_chat_member(f"@{CHANNEL_USERNAME}", user_id)
             is_subscribed = member.status not in ["left", "kicked"]
             if is_subscribed:
-                # تخزين النتيجة في الكاش
                 cache[f"sub_{user_id}"] = True
                 return True
             else:
                 cache[f"sub_{user_id}"] = False
                 return False
         except Exception as e:
-            logger.warning(f"⚠️ محاولة {attempt+1} للتحقق من اشتراك المستخدم {user_id} فشلت: {e}")
+            logger.warning(f"⚠️ محاولة {attempt+1} فشلت: {e}")
             await asyncio.sleep(1)
     
-    # إذا فشلت جميع المحاولات
     return cache.get(f"sub_{user_id}", False)
+
 
 @lru_cache(maxsize=128)
 def get_channel_cover() -> Optional[str]:
-    """جلب صورة القناة مع التخزين المؤقت"""
     try:
         cover_path = os.path.join(TEMP_DIR, "channel_cover.jpg")
-        
-        # إذا كانت الصورة موجودة وحديثة (أقل من 24 ساعة)
         if os.path.exists(cover_path):
             file_age = datetime.now().timestamp() - os.path.getmtime(cover_path)
             if file_age < 86400 and os.path.getsize(cover_path) > 0:
                 return cover_path
-        
-        # يجب تحديث الصورة - يتم ذلك من خلال البوت
         return None
-        
     except Exception as e:
         logger.error(f"❌ خطأ في جلب صورة القناة: {e}")
         return None
 
+
 def add_user(user_id: int, first_name: str, username: str = None):
-    """إضافة مستخدم جديد إلى قاعدة البيانات"""
     try:
-        query = """
-            INSERT OR REPLACE INTO users 
-            (user_id, first_name, username, join_date, last_active) 
-            VALUES (?, ?, ?, ?, ?)
-        """
         db_manager.execute_update(
-            query,
+            "INSERT OR REPLACE INTO users (user_id, first_name, username, join_date, last_active) VALUES (?, ?, ?, ?, ?)",
             (user_id, first_name, username, datetime.now().strftime("%Y-%m-%d %H:%M"), 
              datetime.now().strftime("%Y-%m-%d %H:%M"))
         )
         logger.info(f"✅ تم تسجيل المستخدم {user_id}")
-        
     except Exception as e:
         logger.error(f"❌ خطأ في إضافة المستخدم: {e}")
 
+
 def add_file_record(user_id: int, title: str, artist: str, file_path: str = None, status: str = "success"):
-    """تسجيل عملية ناجحة في قاعدة البيانات"""
     try:
         file_size = 0
         duration = 0
-        quality = DEFAULT_AUDIO_QUALITY
-        
         if file_path and os.path.exists(file_path):
             file_size = os.path.getsize(file_path)
             try:
@@ -576,45 +448,28 @@ def add_file_record(user_id: int, title: str, artist: str, file_path: str = None
                 audio = MP3(file_path)
                 duration = int(audio.info.length)
             except:
-                try:
-                    from pydub import AudioSegment
-                    audio = AudioSegment.from_file(file_path)
-                    duration = len(audio) // 1000
-                except:
-                    pass
+                pass
         
-        query = """
-            INSERT INTO files 
-            (user_id, title, artist, file_name, file_size, duration, quality, date, status) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """
         db_manager.execute_update(
-            query,
+            "INSERT INTO files (user_id, title, artist, file_name, file_size, duration, quality, date, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (user_id, title, artist, os.path.basename(file_path) if file_path else "", 
-             file_size, duration, quality, datetime.now().strftime("%Y-%m-%d %H:%M"), status)
+             file_size, duration, DEFAULT_AUDIO_QUALITY, datetime.now().strftime("%Y-%m-%d %H:%M"), status)
         )
         logger.info(f"✅ تم تسجيل ملف جديد: {title} - {artist}")
         return True
-        
     except Exception as e:
         logger.error(f"❌ خطأ في تسجيل الملف: {e}")
         return False
 
+
 async def auto_clear_cache():
-    """تنظيف الملفات المؤقتة بشكل دوري"""
     file_manager.cleanup()
 
+
 def get_user_stats(user_id: int) -> Dict:
-    """الحصول على إحصائيات المستخدم"""
     try:
-        files_count = db_manager.execute_query(
-            "SELECT COUNT(*) FROM files WHERE user_id = ?", (user_id,)
-        )
-        
-        last_activity = db_manager.execute_query(
-            "SELECT MAX(date) FROM files WHERE user_id = ?", (user_id,)
-        )
-        
+        files_count = db_manager.execute_query("SELECT COUNT(*) FROM files WHERE user_id = ?", (user_id,))
+        last_activity = db_manager.execute_query("SELECT MAX(date) FROM files WHERE user_id = ?", (user_id,))
         return {
             "files_count": files_count[0][0] if files_count else 0,
             "last_activity": last_activity[0][0] if last_activity and last_activity[0][0] else "لا يوجد"
@@ -623,17 +478,15 @@ def get_user_stats(user_id: int) -> Dict:
         logger.error(f"❌ خطأ في جلب إحصائيات المستخدم: {e}")
         return {"files_count": 0, "last_activity": "خطأ"}
 
+
 def get_total_stats() -> Dict:
-    """الحصول على إحصائيات البوت الكلية"""
     try:
         total_users = db_manager.execute_query("SELECT COUNT(*) FROM users")
         total_files = db_manager.execute_query("SELECT COUNT(*) FROM files")
-        
         today = datetime.now().strftime("%Y-%m-%d")
         active_today = db_manager.execute_query(
             "SELECT COUNT(DISTINCT user_id) FROM files WHERE date LIKE ?", (f"{today}%",)
         )
-        
         return {
             "total_users": total_users[0][0] if total_users else 0,
             "total_files": total_files[0][0] if total_files else 0,
