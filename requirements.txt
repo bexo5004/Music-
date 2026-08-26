@@ -1,0 +1,2 @@
+python-telegram-bot[job-queue]==20.7
+mutagen==1.46.0
