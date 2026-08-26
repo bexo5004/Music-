@@ -175,7 +175,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 is_image = (
                     mime_type.startswith('image/') or 
-                    file_name.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.ico'))
+                    file_name.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff'))
                 )
                 
                 if not is_image:
@@ -323,10 +323,12 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
+    # ===== وضع استخراج الصوت من الفيديو =====
     if mode == 'mysong_extract' and step == 'waiting_for_video':
         
         video_obj = None
         
+        # التحقق من نوع الملف
         if update.message.video:
             video_obj = update.message.video
         elif update.message.document:
@@ -334,12 +336,14 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mime_type = doc.mime_type or ""
             file_name = doc.file_name or ""
             if (mime_type.startswith('video/') or 
-                file_name.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.3gp', '.m4v', '.mpg', '.mpeg'))):
+                file_name.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.3gp', '.m4v'))):
                 video_obj = doc
         
         if not video_obj:
             await update.message.reply_text(
-                "نوع الملف غير مدعوم\n\nالرجاء إرسال ملف فيديو بصيغة:\nMP4, MOV, AVI, MKV, WEBM, FLV, 3GP"
+                "نوع الملف غير مدعوم\n\n"
+                "الرجاء إرسال ملف فيديو بصيغة:\n"
+                "MP4, MOV, AVI, MKV, WEBM, FLV, 3GP"
             )
             return
         
@@ -353,6 +357,7 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "جاري تحميل الفيديو...\n\nقد يستغرق هذا بضع ثوان"
         )
         
+        # تحميل الفيديو
         video_path = await file_manager.download_file(video_obj, f"video_{user_id}")
         
         if not video_path or not os.path.exists(video_path):
@@ -363,6 +368,7 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         try:
+            # التحقق من الفيديو
             is_valid, message = FileValidator.validate_video_file(video_path)
             if not is_valid:
                 await wait_msg.edit_text(
@@ -377,10 +383,12 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "جاري استخراج الصوت من الفيديو...\n\nهذا قد يستغرق بضع ثوان"
             )
             
+            # استخراج الصوت
             processor = AudioProcessor()
             quality = context.user_data.get('selected_quality', '192k')
             audio_path = await processor.extract_audio_from_video(video_path, quality)
             
+            # تنظيف الفيديو
             if os.path.exists(video_path):
                 os.remove(video_path)
                 logger.info(f"تم حذف الفيديو: {video_path}")
@@ -396,6 +404,7 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.clear()
                 return
             
+            # التحقق من الملف الصوتي
             is_valid, message = FileValidator.validate_audio_file(audio_path)
             if not is_valid:
                 await wait_msg.edit_text(
@@ -431,6 +440,7 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.clear()
             return
     
+    # ===== وضع الصوت =====
     elif mode in ['mysong_edit', 'mysong_new'] and step == 'waiting_for_audio':
         
         file_obj = None
