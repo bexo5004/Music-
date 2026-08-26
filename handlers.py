@@ -1,63 +1,88 @@
 import os
-import subprocess
 import asyncio
-import sqlite3
 from datetime import datetime
-from telegram import Update
+from typing import Optional
+from telegram import Update, Audio, Document, Video
 from telegram.ext import ContextTypes
-from mutagen.id3 import ID3, TIT2, TPE1, APIC, error as MutagenError
 
 from utils import (
-    check_subscription, is_maintenance, DB_FILE, OWNER_ID, 
-    MAX_FILE_SIZE, get_channel_cover, add_user, add_file_record
+    check_subscription, is_maintenance, OWNER_ID, 
+    MAX_FILE_SIZE, add_user, add_file_record,
+    file_manager, db_manager, logger, cache,
+    FileValidator, AudioProcessor
 )
 
 # ============================================
-# دالة البداية
+# دالة البداية المحسنة
 # ============================================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج بداية البوت المحسن"""
     if await is_maintenance(update, context): 
         return
     
+    user = update.effective_user
+    user_id = user.id
+    
+    # التحقق من الاشتراك مع تخزين مؤقت
+    cache_key = f"sub_{user_id}"
+    if cache_key not in cache:
+        if not await check_subscription(user_id, context):
+            await update.message.reply_text(
+                f"⚠️ **أنت غير مشترك في القناة!**\n\n"
+                f"يجب الاشتراك أولاً في القناة التالية:\n"
+                f"👉 @{CHANNEL_USERNAME}\n\n"
+                f"بعد الاشتراك، ارسل /start مرة أخرى."
+            )
+            return
+        cache[cache_key] = True
+    
+    # تسجيل المستخدم
+    add_user(user_id, user.first_name, user.username)
+    
     from keyboards import main_menu_keyboard
     
-    user = update.effective_user
-    if not await check_subscription(user.id, context):
-        await update.message.reply_text(
-            "⚠️ أنت غير مشترك في القناة!\n\n"
-            "يجب الاشتراك أولاً في القناة التالية:\n"
-            f"👉 @BEXO50\n\n"
-            "بعد الاشتراك، ارسل /start مرة أخرى."
-        )
-        return
-
-    add_user(user.id, user.first_name)
-
     await update.message.reply_text(
-        f"🚀 أهلاً بك {user.first_name} في بوت الخدمات الصوتية!\n\n"
-        "إختر ما تريد فعله من الأزرار أدناه:",
+        f"🚀 **أهلاً بك {user.first_name}!**\n\n"
+        f"📱 مرحباً بك في بوت الخدمات الصوتية المتقدم!\n\n"
+        f"✨ يمكنك:\n"
+        f"• 🎵 تعديل الأغاني وإضافة البيانات\n"
+        f"• 🎬 استخراج الصوت من الفيديوهات\n"
+        f"• 🖼️ إنشاء أغاني كاملة مع صور\n"
+        f"• 📊 متابعة إحصائياتك\n\n"
+        f"اختر ما تريد من الأزرار أدناه 👇",
         reply_markup=main_menu_keyboard()
     )
 
 # ============================================
-# معالج الكولباك (الأزرار)
+# معالج الكولباك المحسن
 # ============================================
 async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج الأزرار المحسن"""
     query = update.callback_query
     data = query.data
     user_id = query.from_user.id
     
     await query.answer()
     
-    # ===== أزرار وضع "أغنيتي" المتكاملة =====
+    # التحقق من الاشتراك
+    if not await check_subscription(user_id, context):
+        await query.edit_message_text(
+            f"⚠️ **أنت غير مشترك في القناة!**\n\n"
+            f"يجب الاشتراك أولاً في القناة التالية:\n"
+            f"👉 @{CHANNEL_USERNAME}"
+        )
+        return
+    
+    # ===== أزرار وضع "أغنيتي" =====
     if data == "mysong_edit":
         context.user_data.clear()
         context.user_data['mode'] = 'mysong_edit'
         context.user_data['step'] = 'waiting_for_audio'
         await query.edit_message_text(
-            "🎵 تعديل أغنية موجودة\n\n"
-            "📤 أرسل لي الآن الملف الصوتي (MP3) الذي تريد تعديل اسمه وإضافة صورة له.\n\n"
-            "⚠️ الحد الأقصى للحجم: 70MB"
+            "🎵 **تعديل أغنية موجودة**\n\n"
+            "📤 أرسل لي الآن الملف الصوتي (MP3) الذي تريد تعديله.\n\n"
+            "⚠️ الحد الأقصى للحجم: 70MB\n"
+            "✅ سأطلب منك الاسم والفنان والصورة بعد التحميل"
         )
     
     elif data == "mysong_extract":
@@ -65,9 +90,10 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data['mode'] = 'mysong_extract'
         context.user_data['step'] = 'waiting_for_video'
         await query.edit_message_text(
-            "🎬 استخراج صوت من فيديو + إضافة صورة\n\n"
-            "📤 أرسل لي الآن ملف الفيديو (MP4) لاستخراج الصوت منه، ثم سنضيف الاسم والصورة.\n\n"
-            "⚠️ الحد الأقصى للحجم: 70MB"
+            "🎬 **استخراج صوت من فيديو**\n\n"
+            "📤 أرسل لي الآن ملف الفيديو (MP4) لاستخراج الصوت منه.\n\n"
+            "⚠️ الحد الأقصى للحجم: 70MB\n"
+            "✅ سأستخرج الصوت ثم أطلب الاسم والصورة"
         )
     
     elif data == "mysong_new":
@@ -75,9 +101,10 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data['mode'] = 'mysong_new'
         context.user_data['step'] = 'waiting_for_audio'
         await query.edit_message_text(
-            "🆕 رفع ملف صوتي جديد + صورة\n\n"
-            "📤 أرسل لي الآن الملف الصوتي (MP3) وسأطلب منك الاسم والفنان والصورة.\n\n"
-            "⚠️ الحد الأقصى للحجم: 70MB"
+            "🆕 **رفع ملف صوتي جديد**\n\n"
+            "📤 أرسل لي الآن الملف الصوتي (MP3).\n\n"
+            "⚠️ الحد الأقصى للحجم: 70MB\n"
+            "✅ سأطلب منك الاسم والفنان والصورة بعد التحميل"
         )
     
     # ===== أزرار اختيار الجودة =====
@@ -93,35 +120,62 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         else:
             msg = "🎬 أرسل الآن ملف الفيديو (MP4) لاستخراج الصوت منه:"
         
-        await query.edit_message_text(f"✅ تم اختيار جودة {quality}.\n\n{msg}")
+        await query.edit_message_text(
+            f"✅ تم اختيار جودة {quality}.\n\n"
+            f"{msg}\n\n"
+            f"⚠️ الحد الأقصى للحجم: 70MB"
+        )
     
     elif data == "cancel_action":
         context.user_data.clear()
         await query.edit_message_text("❌ تم إلغاء العملية.")
+        await query.message.delete()
     
     # ===== أزرار الإحصائيات =====
     elif data == "my_stats":
-        conn = sqlite3.connect(DB_FILE)
-        files_count = conn.execute(
+        stats = db_manager.execute_query(
             "SELECT COUNT(*) FROM files WHERE user_id = ?", (user_id,)
-        ).fetchone()[0]
-        conn.close()
-        
-        await query.edit_message_text(
-            f"📊 إحصائياتك الشخصية\n\n"
-            f"✅ عدد الأغاني التي قمت بمعالجتها: {files_count}"
         )
+        files_count = stats[0][0] if stats else 0
+        
+        # آخر 5 ملفات
+        last_files = db_manager.execute_query(
+            "SELECT title, artist, date FROM files WHERE user_id = ? ORDER BY date DESC LIMIT 5",
+            (user_id,)
+        )
+        
+        message = f"📊 **إحصائياتك الشخصية**\n\n"
+        message += f"✅ عدد الأغاني المعالجة: {files_count}\n\n"
+        
+        if last_files:
+            message += "📝 **آخر 5 ملفات:**\n"
+            for file in last_files:
+                message += f"• {file[0]} - {file[1]} ({file[2][:10]})\n"
+        else:
+            message += "لا توجد ملفات معالجة حتى الآن."
+        
+        await query.edit_message_text(message)
 
 # ============================================
-# معالج الملفات (الصوت والفيديو)
+# معالج الملفات المحسن (الصوت والفيديو)
 # ============================================
 async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج الملفات المحسن مع التحقق من الصحة"""
     if await is_maintenance(update, context): 
         return
     
     user_id = update.effective_user.id
     mode = context.user_data.get('mode')
     step = context.user_data.get('step')
+    
+    # التحقق من الاشتراك
+    if not await check_subscription(user_id, context):
+        await update.message.reply_text(
+            f"⚠️ **أنت غير مشترك في القناة!**\n\n"
+            f"يجب الاشتراك أولاً في القناة التالية:\n"
+            f"👉 @{CHANNEL_USERNAME}"
+        )
+        return
     
     # ===== وضع mysong =====
     if mode and step:
@@ -136,65 +190,108 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     file_obj = doc
             
             if not file_obj:
-                await update.message.reply_text("❌ من فضلك أرسل ملف صوتي بصيغة MP3")
+                await update.message.reply_text(
+                    "❌ **نوع الملف غير مدعوم**\n\n"
+                    "الرجاء إرسال ملف صوتي بصيغة MP3."
+                )
                 return
             
             if file_obj.file_size > MAX_FILE_SIZE:
-                await update.message.reply_text(f"❌ حجم الملف كبير جداً (الحد الأقصى 70MB)")
+                await update.message.reply_text(
+                    f"❌ **حجم الملف كبير جداً**\n\n"
+                    f"الحد الأقصى: {MAX_FILE_SIZE // (1024*1024)}MB"
+                )
                 return
             
-            wait_msg = await update.message.reply_text("⏳ جاري تحميل الملف الصوتي...")
-            tg_file = await file_obj.get_file()
-            audio_path = f"audio_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.mp3"
-            await tg_file.download_to_drive(audio_path)
+            wait_msg = await update.message.reply_text(
+                "⏳ **جاري تحميل الملف الصوتي...**\n\n"
+                "الرجاء الانتظار"
+            )
             
-            context.user_data['audio_path'] = audio_path
+            # تحميل الملف باستخدام المدير المحسن
+            file_path = await file_manager.download_file(file_obj, f"audio_{user_id}")
+            
+            if not file_path:
+                await wait_msg.edit_text(
+                    "❌ **فشل تحميل الملف**\n\n"
+                    "الرجاء المحاولة مرة أخرى."
+                )
+                return
+            
+            # التحقق من صحة الملف
+            is_valid, message = FileValidator.validate_audio_file(file_path)
+            if not is_valid:
+                await wait_msg.edit_text(f"❌ **الملف غير صالح**\n\n{message}")
+                # تنظيف الملف
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                return
+            
+            context.user_data['audio_path'] = file_path
             context.user_data['step'] = 'waiting_for_title'
-            await wait_msg.edit_text("📝 أرسل الآن اسم الأغنية:")
+            await wait_msg.edit_text(
+                f"✅ **تم تحميل الملف بنجاح!**\n\n"
+                f"{message}\n\n"
+                f"📝 **أرسل الآن اسم الأغنية:**"
+            )
             return
         
         # استقبال ملف الفيديو
         elif step == 'waiting_for_video' and mode == 'mysong_extract':
-            if not update.message.video:
-                await update.message.reply_text("❌ من فضلك أرسل ملف فيديو (MP4)")
+            if not update.message.video and not update.message.document:
+                await update.message.reply_text(
+                    "❌ **نوع الملف غير مدعوم**\n\n"
+                    "الرجاء إرسال ملف فيديو (MP4)."
+                )
                 return
             
-            file_obj = update.message.video
+            file_obj = update.message.video or update.message.document
             if file_obj.file_size > MAX_FILE_SIZE:
-                await update.message.reply_text(f"❌ حجم الملف كبير جداً (الحد الأقصى 70MB)")
+                await update.message.reply_text(
+                    f"❌ **حجم الملف كبير جداً**\n\n"
+                    f"الحد الأقصى: {MAX_FILE_SIZE // (1024*1024)}MB"
+                )
                 return
             
-            wait_msg = await update.message.reply_text("⏳ جاري تحميل الفيديو واستخراج الصوت...")
-            tg_file = await file_obj.get_file()
-            video_path = f"video_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.mp4"
-            await tg_file.download_to_drive(video_path)
-            
-            audio_path = f"extracted_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.mp3"
-            
-            cmd = [
-                "ffmpeg", "-i", video_path, "-vn", "-acodec", "libmp3lame",
-                "-ac", "2", "-b:a", "192k", audio_path, "-y"
-            ]
-            
-            process = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            wait_msg = await update.message.reply_text(
+                "⏳ **جاري تحميل الفيديو واستخراج الصوت...**\n\n"
+                "قد يستغرق هذا بضع ثوانٍ"
             )
-            await process.wait()
             
-            # تنظيف ملف الفيديو
+            # تحميل الفيديو
+            video_path = await file_manager.download_file(file_obj, f"video_{user_id}")
+            
+            if not video_path:
+                await wait_msg.edit_text(
+                    "❌ **فشل تحميل الفيديو**\n\n"
+                    "الرجاء المحاولة مرة أخرى."
+                )
+                return
+            
+            # استخراج الصوت
+            processor = AudioProcessor()
+            audio_path = await processor.extract_audio_from_video(
+                video_path, 
+                context.user_data.get('selected_quality', '192k')
+            )
+            
+            # تنظيف الفيديو
             if os.path.exists(video_path):
                 os.remove(video_path)
             
-            if process.returncode != 0:
-                await wait_msg.edit_text("❌ حدث خطأ أثناء استخراج الصوت.")
-                # تنظيف ملف الصوت في حالة الفشل
-                if os.path.exists(audio_path):
-                    os.remove(audio_path)
+            if not audio_path:
+                await wait_msg.edit_text(
+                    "❌ **فشل استخراج الصوت**\n\n"
+                    "قد يكون الفيديو تالفاً أو لا يحتوي على صوت."
+                )
                 return
             
             context.user_data['audio_path'] = audio_path
             context.user_data['step'] = 'waiting_for_title'
-            await wait_msg.edit_text("✅ تم استخراج الصوت بنجاح!\n\n📝 أرسل الآن **اسم الأغنية**:")
+            await wait_msg.edit_text(
+                "✅ **تم استخراج الصوت بنجاح!**\n\n"
+                "📝 **أرسل الآن اسم الأغنية:**"
+            )
             return
         
         # إذا كان المستخدم في وضع mysong لكنه أرسل ملف غير مناسب
@@ -223,7 +320,10 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file_obj = doc
         
         if not file_obj:
-            await update.message.reply_text("❌ الرجاء إرسال ملف صوتي MP3 للتعديل")
+            await update.message.reply_text(
+                "❌ **نوع الملف غير مدعوم**\n\n"
+                "الرجاء إرسال ملف صوتي MP3 للتعديل"
+            )
             context.user_data.clear()
             return
             
@@ -232,81 +332,108 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_obj = update.message.video
         
         if not file_obj:
-            await update.message.reply_text("❌ الرجاء إرسال ملف فيديو MP4 لاستخراج الصوت")
+            await update.message.reply_text(
+                "❌ **نوع الملف غير مدعوم**\n\n"
+                "الرجاء إرسال ملف فيديو MP4 لاستخراج الصوت"
+            )
             context.user_data.clear()
             return
     
     if file_obj.file_size > MAX_FILE_SIZE:
-        await update.message.reply_text("❌ حجم الملف كبير جداً (الحد الأقصى 70MB).")
+        await update.message.reply_text(
+            f"❌ **حجم الملف كبير جداً**\n\n"
+            f"الحد الأقصى: {MAX_FILE_SIZE // (1024*1024)}MB"
+        )
         context.user_data.clear()
         return
     
-    wait_msg = await update.message.reply_text("⏳ جاري التحميل والمعالجة...")
+    wait_msg = await update.message.reply_text(
+        "⏳ **جاري التحميل والمعالجة...**\n\n"
+        "الرجاء الانتظار"
+    )
     
     try:
-        tg_file = await file_obj.get_file()
-        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-        input_path = f"input_{user_id}_{timestamp}"
-        output_path = f"output_{user_id}_{timestamp}.mp3"
+        # تحميل الملف
+        input_path = await file_manager.download_file(file_obj, f"input_{user_id}")
         
-        await tg_file.download_to_drive(input_path)
+        if not input_path:
+            await wait_msg.edit_text("❌ **فشل تحميل الملف**\n\nالرجاء المحاولة مرة أخرى.")
+            context.user_data.clear()
+            return
         
-        cmd = [
-            "ffmpeg", "-i", input_path, "-vn", "-acodec", "libmp3lame",
-            "-ac", "2", "-b:a", quality, output_path, "-y"
-        ]
-        
-        process = subprocess.run(cmd, capture_output=True)
+        # معالجة الصوت
+        processor = AudioProcessor()
+        output_path = await processor.process_audio(input_path, quality)
         
         # تنظيف ملف الإدخال
         if os.path.exists(input_path):
             os.remove(input_path)
         
-        if process.returncode != 0:
-            await wait_msg.edit_text("❌ حدث خطأ أثناء المعالجة.")
-            # تنظيف ملف الإخراج
-            if os.path.exists(output_path):
-                os.remove(output_path)
+        if not output_path:
+            await wait_msg.edit_text(
+                "❌ **فشل معالجة الملف**\n\n"
+                "قد يكون الملف تالفاً أو غير مدعوم."
+            )
             context.user_data.clear()
             return
         
         context.user_data["file_path"] = output_path
         context.user_data["step"] = "title"
-        await wait_msg.edit_text("📝 تمت المعالجة! الآن أرسل اسم الأغنية:")
+        await wait_msg.edit_text(
+            "✅ **تمت المعالجة بنجاح!**\n\n"
+            "📝 **أرسل الآن اسم الأغنية:**"
+        )
         
     except Exception as e:
-        await wait_msg.edit_text(f"❌ حدث خطأ: {str(e)}")
-        # تنظيف الملفات في حالة الخطأ
-        for path in [input_path, output_path]:
-            if 'path' in locals() and os.path.exists(path):
-                try:
-                    os.remove(path)
-                except:
-                    pass
+        logger.error(f"❌ خطأ في معالجة الملف: {e}")
+        await wait_msg.edit_text(
+            f"❌ **حدث خطأ أثناء المعالجة**\n\n"
+            f"الرجاء المحاولة مرة أخرى."
+        )
         context.user_data.clear()
 
 # ============================================
-# معالج الصور
+# معالج الصور المحسن
 # ============================================
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج الصور المحسن مع التحقق من الصحة"""
     if await is_maintenance(update, context): 
         return
     
     user_id = update.effective_user.id
     
+    # التحقق من الاشتراك
+    if not await check_subscription(user_id, context):
+        await update.message.reply_text(
+            f"⚠️ **أنت غير مشترك في القناة!**\n\n"
+            f"يجب الاشتراك أولاً في القناة التالية:\n"
+            f"👉 @{CHANNEL_USERNAME}"
+        )
+        return
+    
     if context.user_data.get('mode') and context.user_data.get('step') == 'waiting_for_cover':
         
-        wait_msg = await update.message.reply_text("🖼️ جاري معالجة الصورة ودمجها مع الأغنية...")
+        wait_msg = await update.message.reply_text(
+            "🖼️ **جاري معالجة الصورة...**\n\n"
+            "الرجاء الانتظار"
+        )
         
-        cover_path = f"cover_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
         audio_path = context.user_data.get('audio_path')
         
+        if not audio_path or not os.path.exists(audio_path):
+            await wait_msg.edit_text(
+                "❌ **حدث خطأ**\n\n"
+                "الملف الصوتي غير موجود. الرجاء البدء من جديد."
+            )
+            context.user_data.clear()
+            return
+        
+        # تحميل الصورة
+        cover_path = None
         try:
             if update.message.photo:
                 photo = update.message.photo[-1]
-                tg_photo = await photo.get_file()
-                cover_path += ".jpg"
-                await tg_photo.download_to_drive(cover_path)
+                cover_path = await file_manager.download_file(photo, f"cover_{user_id}")
             
             elif update.message.document:
                 document = update.message.document
@@ -314,129 +441,171 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file_name = document.file_name or ""
                 
                 if not (mime_type.startswith('image/') or file_name.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp'))):
-                    await wait_msg.edit_text("❌ الملف المرسل ليس صورة.")
+                    await wait_msg.edit_text(
+                        "❌ **نوع الملف غير مدعوم**\n\n"
+                        "الرجاء إرسال صورة بصيغة JPG, PNG, أو WEBP."
+                    )
                     return
                 
-                tg_doc = await document.get_file()
-                
-                if file_name.lower().endswith('.png') or 'png' in mime_type:
-                    cover_path += ".png"
-                elif file_name.lower().endswith('.webp') or 'webp' in mime_type:
-                    cover_path += ".webp"
-                else:
-                    cover_path += ".jpg"
-                
-                await tg_doc.download_to_drive(cover_path)
+                cover_path = await file_manager.download_file(document, f"cover_{user_id}")
             
             else:
-                await wait_msg.edit_text("❌ لم ترسل صورة.")
+                await wait_msg.edit_text("❌ **لم ترسل صورة**\n\nالرجاء إرسال صورة.")
                 return
             
+            if not cover_path:
+                await wait_msg.edit_text("❌ **فشل تحميل الصورة**\n\nالرجاء المحاولة مرة أخرى.")
+                return
+            
+            # التحقق من صحة الصورة
+            is_valid, message = FileValidator.validate_image_file(cover_path)
+            if not is_valid:
+                await wait_msg.edit_text(f"❌ **الصورة غير صالحة**\n\n{message}")
+                if os.path.exists(cover_path):
+                    os.remove(cover_path)
+                return
+            
+            # إضافة البيانات الوصفية
             title = context.user_data.get('title', 'غير معروف')
             artist = context.user_data.get('artist', 'غير معروف')
             
-            if not audio_path or not os.path.exists(audio_path):
-                await wait_msg.edit_text("❌ حدث خطأ: الملف الصوتي غير موجود")
+            processor = AudioProcessor()
+            success = processor.add_metadata(audio_path, title, artist, cover_path)
+            
+            if not success:
+                await wait_msg.edit_text(
+                    "❌ **فشل إضافة البيانات**\n\n"
+                    "حدث خطأ أثناء إضافة الصورة والبيانات."
+                )
+                # تنظيف الملفات
                 if os.path.exists(cover_path):
                     os.remove(cover_path)
+                if os.path.exists(audio_path):
+                    os.remove(audio_path)
                 context.user_data.clear()
                 return
             
-            # تعديل الملف الصوتي
-            try:
-                audio = ID3(audio_path)
-            except MutagenError:
-                audio = ID3()
-            
-            audio["TIT2"] = TIT2(encoding=3, text=title)
-            audio["TPE1"] = TPE1(encoding=3, text=artist)
-            
-            if cover_path.endswith('.png'):
-                mime_type = "image/png"
-            elif cover_path.endswith('.webp'):
-                mime_type = "image/webp"
-            else:
-                mime_type = "image/jpeg"
-            
-            with open(cover_path, "rb") as img:
-                if "APIC" in audio:
-                    del audio["APIC"]
-                audio["APIC"] = APIC(
-                    encoding=3, 
-                    mime=mime_type, 
-                    type=3, 
-                    desc="Cover", 
-                    data=img.read()
-                )
-            
-            audio.save(audio_path, v2_version=3)
-            
+            # إرسال الملف النهائي
             with open(audio_path, "rb") as f:
                 await update.message.reply_audio(
                     audio=f,
                     title=title,
                     performer=artist,
-                    caption="✅ تم إنشاء الأغنية بنجاح!"
+                    caption="✅ **تم إنشاء الأغنية بنجاح!** 🎉\n\n"
+                           f"🎵 **الاسم:** {title}\n"
+                           f"🎤 **الفنان:** {artist}"
                 )
             
-            add_file_record(user_id, title, artist)
+            # تسجيل العملية
+            add_file_record(user_id, title, artist, audio_path)
+            
             await wait_msg.delete()
             
         except Exception as e:
-            await update.message.reply_text(f"❌ حدث خطأ: {str(e)}")
+            logger.error(f"❌ خطأ في معالجة الصورة: {e}")
+            await update.message.reply_text(
+                "❌ **حدث خطأ أثناء المعالجة**\n\n"
+                "الرجاء المحاولة مرة أخرى."
+            )
         
         finally:
-            # تنظيف الملفات المؤقتة دائماً
-            if cover_path and os.path.exists(cover_path):
-                try:
-                    os.remove(cover_path)
-                except:
-                    pass
-            if audio_path and os.path.exists(audio_path):
-                try:
-                    os.remove(audio_path)
-                except:
-                    pass
+            # تنظيف الملفات المؤقتة
+            for path in [cover_path, audio_path]:
+                if path and os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except:
+                        pass
             
             context.user_data.clear()
         return
     
     else:
         # إذا أرسل صورة خارج السياق
-        await update.message.reply_text("❌ لست في وضع إضافة صورة حالياً.\nالرجاء استخدام الأزرار لبدء عملية جديدة.")
+        await update.message.reply_text(
+            "❌ **لست في وضع إضافة صورة حالياً**\n\n"
+            "الرجاء استخدام الأزرار لبدء عملية جديدة."
+        )
 
 # ============================================
-# معالج النصوص (مع زر تشغيل البوت)
+# معالج النصوص المحسن
 # ============================================
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج النصوص المحسن"""
     user_text = update.message.text
     user_id = update.effective_user.id
-
+    
     # ===== الإذاعة للأدمن =====
     if context.user_data.get('admin_step') == 'broadcasting':
         if user_id != OWNER_ID:
             context.user_data['admin_step'] = None
             return
         
-        conn = sqlite3.connect(DB_FILE)
-        users = conn.execute("SELECT user_id FROM users").fetchall()
-        conn.close()
+        # التحقق من وجود رسالة
+        if not user_text or len(user_text.strip()) == 0:
+            await update.message.reply_text("❌ **رسالة فارغة**\n\nالرجاء إرسال نص صالح.")
+            return
+        
+        # إرسال الإذاعة على دفعات
+        users = db_manager.execute_query("SELECT user_id FROM users")
+        
+        if not users:
+            await update.message.reply_text("❌ **لا يوجد مستخدمين**\n\nلا يمكن إرسال الإذاعة.")
+            context.user_data['admin_step'] = None
+            return
+        
+        status_msg = await update.message.reply_text(
+            f"📢 **جاري إرسال الإذاعة...**\n\n"
+            f"👤 عدد المستخدمين: {len(users)}"
+        )
         
         success_count = 0
-        for u in users:
-            try: 
-                await context.bot.send_message(chat_id=u[0], text=user_text)
-                success_count += 1
-            except: 
-                pass
+        fail_count = 0
+        batch_size = 50
+        
+        # إرسال على دفعات
+        for i in range(0, len(users), batch_size):
+            batch = users[i:i+batch_size]
+            tasks = []
+            
+            for user in batch:
+                try:
+                    tasks.append(
+                        context.bot.send_message(
+                            chat_id=user[0],
+                            text=f"📢 **إذاعة من المطور**\n\n{user_text}"
+                        )
+                    )
+                except:
+                    fail_count += 1
+            
+            # انتظار إرسال الدفعة
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            success_count += sum(1 for r in results if not isinstance(r, Exception))
+            fail_count += sum(1 for r in results if isinstance(r, Exception))
+            
+            # تحديث الحالة
+            await status_msg.edit_text(
+                f"📢 **جاري إرسال الإذاعة...**\n\n"
+                f"✅ تم الإرسال: {success_count}\n"
+                f"❌ فشل: {fail_count}"
+            )
+            
+            # تجنب الحظر
+            await asyncio.sleep(0.5)
+        
+        await status_msg.edit_text(
+            f"✅ **تمت الإذاعة بنجاح!**\n\n"
+            f"📨 تم الإرسال لـ: {success_count} مستخدم\n"
+            f"❌ فشل الإرسال لـ: {fail_count} مستخدم"
+        )
         
         context.user_data['admin_step'] = None
-        await update.message.reply_text(f"✅ تمت الإذاعة بنجاح لـ {success_count} مستخدم.")
         return
 
     # ===== أزرار القائمة الرئيسية =====
     
-    # ▶️ زر تشغيل البوت (الأول)
+    # ▶️ زر تشغيل البوت
     if user_text == "▶️ تشغيل البوت":
         await start_handler(update, context)
         return
@@ -445,7 +614,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif user_text == "🎵 تعديل الأغنية":
         from keyboards import quality_keyboard
         await update.message.reply_text(
-            "🎵 تعديل أغنية\n\nاختر جودة الصوت المطلوبة:",
+            "🎵 **تعديل أغنية**\n\n"
+            "اختر جودة الصوت المطلوبة:",
             reply_markup=quality_keyboard("edit")
         )
         return
@@ -454,7 +624,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif user_text == "🎬 استخراج صوت من فيديو":
         from keyboards import quality_keyboard
         await update.message.reply_text(
-            "🎬 استخراج صوت من فيديو\n\nاختر جودة الصوت المطلوبة:",
+            "🎬 **استخراج صوت من فيديو**\n\n"
+            "اختر جودة الصوت المطلوبة:",
             reply_markup=quality_keyboard("extract")
         )
         return
@@ -463,22 +634,23 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif user_text == "🖼️ إنشاء أغنية كاملة (اسم + صورة + صوت)":
         from keyboards import my_song_menu_keyboard
         await update.message.reply_text(
-            "🖼️ إنشاء أغنية كاملة\n\nاختر ما تريد فعله:",
+            "🖼️ **إنشاء أغنية كاملة**\n\n"
+            "اختر ما تريد فعله:",
             reply_markup=my_song_menu_keyboard()
         )
         return
     
     # 📊 زر إحصائياتي
     elif user_text == "📊 إحصائياتي":
-        conn = sqlite3.connect(DB_FILE)
-        files_count = conn.execute(
+        stats = db_manager.execute_query(
             "SELECT COUNT(*) FROM files WHERE user_id = ?", (user_id,)
-        ).fetchone()[0]
-        conn.close()
+        )
+        files_count = stats[0][0] if stats else 0
         
         await update.message.reply_text(
-            f"📊 إحصائياتك الشخصية\n\n"
-            f"✅ عدد الأغاني التي تمت معالجتها: {files_count}"
+            f"📊 **إحصائياتك الشخصية**\n\n"
+            f"✅ عدد الأغاني المعالجة: {files_count}\n\n"
+            f"💡 استخدم البوت لمعالجة المزيد من الأغاني!"
         )
         return
     
@@ -488,7 +660,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from admin_panel import panel_handler
             await panel_handler(update, context)
         else:
-            await update.message.reply_text("❌ هذه الخاصية متاحة للمطور فقط.")
+            await update.message.reply_text("❌ **هذه الخاصية متاحة للمطور فقط.**")
         return
 
     # ===== وضع mysong - استقبال النصوص =====
@@ -497,27 +669,39 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if step == 'waiting_for_title':
             if len(user_text) > 100:
-                await update.message.reply_text("❌ اسم الأغنية طويل جداً (الحد الأقصى 100 حرف).")
+                await update.message.reply_text(
+                    "❌ **اسم الأغنية طويل جداً**\n\n"
+                    "الحد الأقصى: 100 حرف"
+                )
                 return
-            context.user_data['title'] = user_text
+            context.user_data['title'] = user_text.strip()
             context.user_data['step'] = 'waiting_for_artist'
-            await update.message.reply_text("🎤 أرسل الآن اسم الفنان:")
+            await update.message.reply_text(
+                "🎤 **أرسل الآن اسم الفنان:**"
+            )
             return
         
         elif step == 'waiting_for_artist':
             if len(user_text) > 100:
-                await update.message.reply_text("❌ اسم الفنان طويل جداً (الحد الأقصى 100 حرف).")
+                await update.message.reply_text(
+                    "❌ **اسم الفنان طويل جداً**\n\n"
+                    "الحد الأقصى: 100 حرف"
+                )
                 return
-            context.user_data['artist'] = user_text
+            context.user_data['artist'] = user_text.strip()
             context.user_data['step'] = 'waiting_for_cover'
             await update.message.reply_text(
-                "🖼️ أرسل الآن الصورة التي تريد استخدامها كغلاف للأغنية\n"
-                "(JPG أو PNG)"
+                "🖼️ **أرسل الآن الصورة التي تريد استخدامها كغلاف**\n\n"
+                "📌 الصيغ المدعومة: JPG, PNG, WEBP\n"
+                "📌 الحجم الموصى به: 500x500 بكسل"
             )
             return
         
         elif step == 'waiting_for_cover':
-            await update.message.reply_text("❌ أنا في انتظار صورة وليس نص. أرسل صورة من فضلك.")
+            await update.message.reply_text(
+                "❌ **أنا في انتظار صورة وليس نص**\n\n"
+                "الرجاء إرسال صورة."
+            )
             return
 
     # ===== إكمال عملية التعديل العادي =====
@@ -526,44 +710,66 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_path = context.user_data["file_path"]
 
         if step == "title":
-            context.user_data["title"] = user_text
+            if len(user_text) > 100:
+                await update.message.reply_text(
+                    "❌ **اسم الأغنية طويل جداً**\n\n"
+                    "الحد الأقصى: 100 حرف"
+                )
+                return
+            context.user_data["title"] = user_text.strip()
             context.user_data["step"] = "artist"
-            await update.message.reply_text("🎤 الآن أرسل (اسم الفنان):")
+            await update.message.reply_text(
+                "🎤 **الآن أرسل اسم الفنان:**"
+            )
         
         elif step == "artist":
+            if len(user_text) > 100:
+                await update.message.reply_text(
+                    "❌ **اسم الفنان طويل جداً**\n\n"
+                    "الحد الأقصى: 100 حرف"
+                )
+                return
+            
             title = context.user_data["title"]
-            artist = user_text
+            artist = user_text.strip()
+            
+            wait_msg = await update.message.reply_text(
+                "🔄 **جاري إضافة البيانات وإرسال الملف...**\n\n"
+                "الرجاء الانتظار"
+            )
             
             try:
-                try:
-                    audio = ID3(file_path)
-                except:
-                    audio = ID3()
+                # إضافة البيانات الوصفية
+                processor = AudioProcessor()
+                success = processor.add_metadata(file_path, title, artist)
                 
-                audio["TIT2"] = TIT2(encoding=3, text=title)
-                audio["TPE1"] = TPE1(encoding=3, text=artist)
+                if not success:
+                    await wait_msg.edit_text(
+                        "❌ **فشل إضافة البيانات**\n\n"
+                        "حدث خطأ أثناء معالجة الملف."
+                    )
+                    return
                 
-                # إضافة غلاف القناة إذا كان متاحاً
-                cover = await get_channel_cover(context)
-                if cover:
-                    with open(cover, "rb") as img:
-                        audio["APIC"] = APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=img.read())
-                
-                audio.save(file_path)
-                
+                # إرسال الملف
                 with open(file_path, "rb") as f:
-                    await update.message.reply_audio(audio=f, title=title, performer=artist)
+                    await update.message.reply_audio(
+                        audio=f,
+                        title=title,
+                        performer=artist,
+                        caption="✅ **تم تعديل الأغنية بنجاح!** 🎉"
+                    )
                 
-                conn = sqlite3.connect(DB_FILE)
-                conn.execute(
-                    "INSERT INTO files (user_id, title, artist, date) VALUES (?, ?, ?, ?)",
-                    (user_id, title, artist, datetime.now().strftime("%Y-%m-%d %H:%M"))
-                )
-                conn.commit()
-                conn.close()
+                # تسجيل العملية
+                add_file_record(user_id, title, artist, file_path)
+                
+                await wait_msg.delete()
                 
             except Exception as e:
-                await update.message.reply_text(f"❌ حدث خطأ أثناء حفظ البيانات: {str(e)}")
+                logger.error(f"❌ خطأ في حفظ البيانات: {e}")
+                await wait_msg.edit_text(
+                    "❌ **حدث خطأ أثناء المعالجة**\n\n"
+                    "الرجاء المحاولة مرة أخرى."
+                )
             
             finally:
                 # تنظيف الملفات
@@ -579,6 +785,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # رسالة افتراضية للنصوص غير المعروفة
     await update.message.reply_text(
-        "❓ عذراً، لم أفهم طلبك.\n"
-        "الرجاء استخدام الأزرار المتاحة في القائمة."
+        "❓ **عذراً، لم أفهم طلبك.**\n\n"
+        "الرجاء استخدام الأزرار المتاحة في القائمة.\n"
+        "إذا كنت بحاجة للمساعدة، أرسل /start لإعادة تشغيل البوت."
     )
