@@ -2,12 +2,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# تثبيت FFmpeg مع جميع المكتبات
+# تثبيت FFmpeg مع الحزم المتوفرة فقط
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     libavcodec-extra \
-    libavformat-extra \
-    libavdevice-extra \
     && rm -rf /var/lib/apt/lists/*
 
 # التحقق من تثبيت FFmpeg
