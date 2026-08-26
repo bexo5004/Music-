@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.mp3
+input_*
+output_*
+channel_cover_cached.jpg
+bot_stats.db
