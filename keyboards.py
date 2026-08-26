@@ -1,7 +1,6 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 
 def main_menu_keyboard():
-    """القائمة الرئيسية المحسنة"""
     keyboard = [
         [KeyboardButton("▶️ تشغيل البوت")],
         [KeyboardButton("🎵 تعديل الأغنية"), KeyboardButton("🎬 استخراج صوت من فيديو")],
@@ -11,7 +10,6 @@ def main_menu_keyboard():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def my_song_menu_keyboard():
-    """قائمة أغنيتي المحسنة"""
     keyboard = [
         [InlineKeyboardButton("📝 تعديل اسم وصورة أغنية", callback_data="mysong_edit")],
         [InlineKeyboardButton("🎬 استخراج صوت من فيديو + إضافة صورة", callback_data="mysong_extract")],
@@ -21,22 +19,20 @@ def my_song_menu_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 def quality_keyboard(action_type):
-    """قائمة اختيار الجودة المحسنة"""
     keyboard = [
         [
-            InlineKeyboardButton("🎵 128kbps (صغير)", callback_data=f"q_128_{action_type}"),
-            InlineKeyboardButton("🎵 192kbps (وسط)", callback_data=f"q_192_{action_type}"),
+            InlineKeyboardButton("🎵 128kbps", callback_data=f"q_128_{action_type}"),
+            InlineKeyboardButton("🎵 192kbps", callback_data=f"q_192_{action_type}"),
         ],
         [
-            InlineKeyboardButton("🎵 256kbps (جيد)", callback_data=f"q_256_{action_type}"),
-            InlineKeyboardButton("🎵 320kbps (ممتاز)", callback_data=f"q_320_{action_type}"),
+            InlineKeyboardButton("🎵 256kbps", callback_data=f"q_256_{action_type}"),
+            InlineKeyboardButton("🎵 320kbps", callback_data=f"q_320_{action_type}"),
         ],
         [InlineKeyboardButton("❌ إلغاء", callback_data="cancel_action")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def admin_panel_keyboard(maintenance_status):
-    """لوحة تحكم الإدارة المحسنة"""
     m_text = "🔴 إيقاف الصيانة" if maintenance_status else "🟢 تفعيل الصيانة"
     keyboard = [
         [InlineKeyboardButton("📊 إحصائيات البوت", callback_data="admin_stats")],
@@ -49,6 +45,5 @@ def admin_panel_keyboard(maintenance_status):
     return InlineKeyboardMarkup(keyboard)
 
 def cancel_keyboard():
-    """زر إلغاء العملية"""
     keyboard = [[InlineKeyboardButton("❌ إلغاء العملية", callback_data="cancel_action")]]
     return InlineKeyboardMarkup(keyboard)
