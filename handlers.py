@@ -1,11 +1,8 @@
 import os
-import subprocess
 import asyncio
-import sqlite3
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ContextTypes
-from mutagen.id3 import ID3, TIT2, TPE1, APIC, error as MutagenError
 from PIL import Image
 
 from utils import (
@@ -16,6 +13,7 @@ from utils import (
 )
 
 from keyboards import main_menu_keyboard, quality_keyboard, my_song_menu_keyboard
+
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_maintenance(update, context): 
@@ -40,6 +38,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "اختر ما تريد فعله من الأزرار أدناه:",
         reply_markup=main_menu_keyboard()
     )
+
 
 async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -133,6 +132,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         
         await query.edit_message_text(message)
 
+
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_maintenance(update, context): 
         return
@@ -175,7 +175,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 is_image = (
                     mime_type.startswith('image/') or 
-                    file_name.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff'))
+                    file_name.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.ico'))
                 )
                 
                 if not is_image:
@@ -188,7 +188,6 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 if cover_path and os.path.exists(cover_path):
                     try:
-                        from PIL import Image
                         img = Image.open(cover_path)
                         img.verify()
                     except Exception as e:
@@ -214,8 +213,6 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             
             try:
-                from PIL import Image
-                
                 img = Image.open(cover_path)
                 
                 if img.mode in ('RGBA', 'LA', 'P'):
@@ -309,6 +306,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "لست في وضع إضافة صورة حالياً\n\nالرجاء استخدام الأزرار لبدء عملية جديدة."
         )
 
+
 async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_maintenance(update, context): 
         return
@@ -328,6 +326,7 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if mode == 'mysong_extract' and step == 'waiting_for_video':
         
         video_obj = None
+        
         if update.message.video:
             video_obj = update.message.video
         elif update.message.document:
@@ -335,12 +334,12 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mime_type = doc.mime_type or ""
             file_name = doc.file_name or ""
             if (mime_type.startswith('video/') or 
-                file_name.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv'))):
+                file_name.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.3gp', '.m4v', '.mpg', '.mpeg'))):
                 video_obj = doc
         
         if not video_obj:
             await update.message.reply_text(
-                "نوع الملف غير مدعوم\n\nالرجاء إرسال ملف فيديو بصيغة:\nMP4, MOV, AVI, MKV, WEBM, FLV"
+                "نوع الملف غير مدعوم\n\nالرجاء إرسال ملف فيديو بصيغة:\nMP4, MOV, AVI, MKV, WEBM, FLV, 3GP"
             )
             return
         
@@ -351,7 +350,7 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         wait_msg = await update.message.reply_text(
-            "جاري تحميل الفيديو واستخراج الصوت...\n\nقد يستغرق هذا بضع ثوان"
+            "جاري تحميل الفيديو...\n\nقد يستغرق هذا بضع ثوان"
         )
         
         video_path = await file_manager.download_file(video_obj, f"video_{user_id}")
@@ -364,6 +363,20 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         try:
+            is_valid, message = FileValidator.validate_video_file(video_path)
+            if not is_valid:
+                await wait_msg.edit_text(
+                    f"الملف غير صالح\n\n{message}"
+                )
+                if os.path.exists(video_path):
+                    os.remove(video_path)
+                context.user_data.clear()
+                return
+            
+            await wait_msg.edit_text(
+                "جاري استخراج الصوت من الفيديو...\n\nهذا قد يستغرق بضع ثوان"
+            )
+            
             processor = AudioProcessor()
             quality = context.user_data.get('selected_quality', '192k')
             audio_path = await processor.extract_audio_from_video(video_path, quality)
@@ -374,7 +387,11 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if not audio_path or not os.path.exists(audio_path):
                 await wait_msg.edit_text(
-                    "فشل استخراج الصوت\n\nقد يكون الفيديو تالفاً أو لا يحتوي على صوت."
+                    "فشل استخراج الصوت\n\n"
+                    "الرجاء التأكد من:\n"
+                    "1- الفيديو يحتوي على صوت\n"
+                    "2- الفيديو ليس تالفاً\n"
+                    "3- الفيديو بصيغة مدعومة"
                 )
                 context.user_data.clear()
                 return
@@ -392,14 +409,18 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['audio_path'] = audio_path
             context.user_data['step'] = 'waiting_for_title'
             await wait_msg.edit_text(
-                f"تم استخراج الصوت بنجاح!\n\n{message}\n\nأرسل الآن اسم الأغنية:"
+                f"تم استخراج الصوت بنجاح!\n\n"
+                f"{message}\n\n"
+                f"أرسل الآن اسم الأغنية:"
             )
             return
             
         except Exception as e:
             logger.error(f"خطأ في استخراج الصوت: {e}")
             await wait_msg.edit_text(
-                "حدث خطأ أثناء استخراج الصوت\n\nالرجاء المحاولة مرة أخرى."
+                f"حدث خطأ أثناء استخراج الصوت\n\n"
+                f"الخطأ: {str(e)}\n\n"
+                f"الرجاء المحاولة مرة أخرى."
             )
             for path in [video_path, audio_path]:
                 if path and os.path.exists(path):
@@ -420,12 +441,12 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mime_type = doc.mime_type or ""
             file_name = doc.file_name or ""
             if (mime_type.startswith('audio/') or 
-                file_name.lower().endswith(('.mp3', '.m4a', '.aac', '.wav', '.ogg'))):
+                file_name.lower().endswith(('.mp3', '.m4a', '.aac', '.wav', '.ogg', '.flac'))):
                 file_obj = doc
         
         if not file_obj:
             await update.message.reply_text(
-                "نوع الملف غير مدعوم\n\nالرجاء إرسال ملف صوتي بصيغة:\nMP3, M4A, AAC, WAV, OGG"
+                "نوع الملف غير مدعوم\n\nالرجاء إرسال ملف صوتي بصيغة:\nMP3, M4A, AAC, WAV, OGG, FLAC"
             )
             return
         
@@ -461,7 +482,9 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['audio_path'] = audio_path
         context.user_data['step'] = 'waiting_for_title'
         await wait_msg.edit_text(
-            f"تم تحميل الملف بنجاح!\n\n{message}\n\nأرسل الآن اسم الأغنية:"
+            f"تم تحميل الملف بنجاح!\n\n"
+            f"{message}\n\n"
+            f"أرسل الآن اسم الأغنية:"
         )
         return
     
@@ -544,6 +567,7 @@ async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             context.user_data.clear()
 
+
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     user_id = update.effective_user.id
@@ -604,32 +628,32 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['admin_step'] = None
         return
     
-    if user_text == "تشغيل البوت" or user_text == "▶️ تشغيل البوت":
+    if user_text in ["▶️ تشغيل البوت", "تشغيل البوت"]:
         await start_handler(update, context)
         return
     
-    elif user_text == "تعديل الأغنية" or user_text == "🎵 تعديل الأغنية":
+    elif user_text in ["🎵 تعديل الأغنية", "تعديل الأغنية"]:
         await update.message.reply_text(
             "تعديل أغنية\n\nاختر جودة الصوت المطلوبة:",
             reply_markup=quality_keyboard("edit")
         )
         return
     
-    elif user_text == "استخراج صوت من فيديو" or user_text == "🎬 استخراج صوت من فيديو":
+    elif user_text in ["🎬 استخراج صوت من فيديو", "استخراج صوت من فيديو"]:
         await update.message.reply_text(
             "استخراج صوت من فيديو\n\nاختر جودة الصوت المطلوبة:",
             reply_markup=quality_keyboard("extract")
         )
         return
     
-    elif user_text == "إنشاء أغنية كاملة (اسم + صورة + صوت)" or user_text == "🖼️ إنشاء أغنية كاملة (اسم + صورة + صوت)":
+    elif user_text in ["🖼️ إنشاء أغنية كاملة (اسم + صورة + صوت)", "إنشاء أغنية كاملة (اسم + صورة + صوت)"]:
         await update.message.reply_text(
             "إنشاء أغنية كاملة\n\nاختر ما تريد فعله:",
             reply_markup=my_song_menu_keyboard()
         )
         return
     
-    elif user_text == "إحصائياتي" or user_text == "📊 إحصائياتي":
+    elif user_text in ["📊 إحصائياتي", "إحصائياتي"]:
         stats = db_manager.execute_query(
             "SELECT COUNT(*) FROM files WHERE user_id = ?", (user_id,)
         )
@@ -640,7 +664,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    elif user_text == "لوحة التحكم" or user_text == "🛠 لوحة التحكم":
+    elif user_text in ["🛠 لوحة التحكم", "لوحة التحكم"]:
         if user_id == OWNER_ID:
             from admin_panel import panel_handler
             await panel_handler(update, context)
