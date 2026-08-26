@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 ALLOWED_TYPES = {
     'audio': ['.mp3', '.m4a', '.aac', '.wav', '.ogg', '.flac'],
     'video': ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.3gp', '.m4v', '.mpg', '.mpeg'],
-    'image': ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff', '.ico']
+    'image': ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff']
 }
 
 cache = TTLCache(maxsize=1000, ttl=300)
@@ -133,23 +133,26 @@ class FileValidator:
             if file_ext not in ALLOWED_TYPES['audio']:
                 return False, f"نوع الملف غير مدعوم: {file_ext}"
             
+            # استخدام FFmpeg للتحقق
             try:
-                from mutagen.mp3 import MP3
-                audio = MP3(file_path)
-                if audio.info.length < 1:
-                    return False, "مدة الملف قصيرة جداً"
-                if audio.info.length > 3600:
-                    return False, "مدة الملف طويلة جداً (أكثر من ساعة)"
-                return True, f"ملف صالح - المدة: {int(audio.info.length)} ثانية"
-            except:
-                try:
-                    from pydub import AudioSegment
-                    audio = AudioSegment.from_file(file_path)
-                    if len(audio) < 1000:
+                cmd = [
+                    "ffprobe",
+                    "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    file_path
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                if result.returncode == 0 and result.stdout.strip():
+                    duration = float(result.stdout.strip())
+                    if duration < 1:
                         return False, "مدة الملف قصيرة جداً"
-                    return True, f"ملف صالح - المدة: {len(audio) // 1000} ثانية"
-                except:
-                    return True, "ملف صالح (تعذر قراءة المدة)"
+                    if duration > 3600:
+                        return False, "مدة الملف طويلة جداً (أكثر من ساعة)"
+                    return True, f"ملف صالح - المدة: {int(duration)} ثانية"
+                return False, "الملف تالف"
+            except:
+                return True, "ملف صالح (تحقق محدود)"
                     
         except Exception as e:
             logger.error(f"خطأ في التحقق من الملف: {e}")
@@ -171,6 +174,7 @@ class FileValidator:
             if file_ext not in ALLOWED_TYPES['video']:
                 return False, f"نوع الملف غير مدعوم: {file_ext}"
             
+            # استخدام FFmpeg للتحقق
             try:
                 cmd = [
                     "ffprobe",
@@ -245,6 +249,19 @@ class AudioProcessor:
     def __init__(self):
         self.temp_dir = TEMP_DIR
     
+    async def _run_ffmpeg(self, cmd: list) -> Tuple[int, str, str]:
+        """تشغيل أمر FFmpeg وإرجاع النتيجة"""
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            return process.returncode, stdout.decode(), stderr.decode()
+        except Exception as e:
+            return -1, "", str(e)
+    
     async def process_audio(self, input_path: str, quality: str = "192k") -> Optional[str]:
         try:
             is_valid, _ = FileValidator.validate_audio_file(input_path)
@@ -254,6 +271,7 @@ class AudioProcessor:
             timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
             output_path = os.path.join(self.temp_dir, f"output_{timestamp}.mp3")
             
+            # أمر FFmpeg محسن
             cmd = [
                 "ffmpeg",
                 "-i", input_path,
@@ -267,17 +285,15 @@ class AudioProcessor:
                 output_path
             ]
             
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await process.communicate()
+            logger.info(f"تشغيل FFmpeg: {' '.join(cmd)}")
             
-            if process.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            returncode, stdout, stderr = await self._run_ffmpeg(cmd)
+            
+            if returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                logger.info(f"تمت معالجة الصوت بنجاح: {output_path}")
                 return output_path
             
-            logger.error(f"خطأ في FFmpeg: {stderr.decode()}")
+            logger.error(f"خطأ في FFmpeg: {stderr}")
             return None
             
         except Exception as e:
@@ -300,7 +316,8 @@ class AudioProcessor:
             timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
             output_path = os.path.join(self.temp_dir, f"extracted_{timestamp}.mp3")
             
-            cmd = [
+            # ===== المحاولة 1: جودة عالية =====
+            cmd1 = [
                 "ffmpeg",
                 "-i", video_path,
                 "-vn",
@@ -313,61 +330,157 @@ class AudioProcessor:
                 output_path
             ]
             
-            logger.info(f"تشغيل أمر FFmpeg: {' '.join(cmd)}")
+            logger.info(f"المحاولة 1: {' '.join(cmd1)}")
             
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
+            returncode1, stdout1, stderr1 = await self._run_ffmpeg(cmd1)
             
-            stdout, stderr = await process.communicate()
-            
-            if process.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                logger.info(f"تم استخراج الصوت بنجاح: {output_path} - الحجم: {os.path.getsize(output_path)}")
+            if returncode1 == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                logger.info(f"تم استخراج الصوت بنجاح (جودة عالية): {output_path}")
                 return output_path
             
-            logger.warning("المحاولة الأولى فشلت، جاري المحاولة بجودة أقل")
+            logger.warning(f"المحاولة 1 فشلت: {stderr1}")
             
-            cmd2 = [
+            # ===== المحاولة 2: إعادة ترميز الفيديو أولاً =====
+            temp_video = os.path.join(self.temp_dir, f"temp_video_{timestamp}.mp4")
+            
+            cmd_reencode = [
+                "ffmpeg",
+                "-i", video_path,
+                "-c:v", "libx264",
+                "-c:a", "aac",
+                "-strict", "experimental",
+                "-y",
+                temp_video
+            ]
+            
+            logger.info(f"إعادة ترميز الفيديو: {' '.join(cmd_reencode)}")
+            
+            returncode_re, stdout_re, stderr_re = await self._run_ffmpeg(cmd_reencode)
+            
+            if returncode_re == 0 and os.path.exists(temp_video) and os.path.getsize(temp_video) > 0:
+                # استخراج الصوت من الفيديو المعاد ترميزه
+                cmd2 = [
+                    "ffmpeg",
+                    "-i", temp_video,
+                    "-vn",
+                    "-acodec", "libmp3lame",
+                    "-ac", "2",
+                    "-b:a", quality,
+                    "-ar", "44100",
+                    "-f", "mp3",
+                    "-y",
+                    output_path
+                ]
+                
+                logger.info(f"المحاولة 2: {' '.join(cmd2)}")
+                
+                returncode2, stdout2, stderr2 = await self._run_ffmpeg(cmd2)
+                
+                # تنظيف الفيديو المؤقت
+                if os.path.exists(temp_video):
+                    os.remove(temp_video)
+                
+                if returncode2 == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    logger.info(f"تم استخراج الصوت بنجاح (بعد إعادة الترميز): {output_path}")
+                    return output_path
+                
+                logger.warning(f"المحاولة 2 فشلت: {stderr2}")
+            
+            # ===== المحاولة 3: جودة منخفضة =====
+            cmd3 = [
                 "ffmpeg",
                 "-i", video_path,
                 "-vn",
                 "-acodec", "libmp3lame",
-                "-ac", "2",
-                "-b:a", "128k",
+                "-ac", "1",
+                "-b:a", "64k",
                 "-ar", "22050",
                 "-f", "mp3",
                 "-y",
                 output_path
             ]
             
-            process2 = await asyncio.create_subprocess_exec(
-                *cmd2,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
+            logger.info(f"المحاولة 3: {' '.join(cmd3)}")
             
-            stdout2, stderr2 = await process2.communicate()
+            returncode3, stdout3, stderr3 = await self._run_ffmpeg(cmd3)
             
-            if process2.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            if returncode3 == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 logger.info(f"تم استخراج الصوت بنجاح (جودة منخفضة): {output_path}")
                 return output_path
             
-            logger.warning("المحاولة الثانية فشلت، جاري المحاولة باستخدام pydub")
+            logger.warning(f"المحاولة 3 فشلت: {stderr3}")
             
-            try:
-                from pydub import AudioSegment
-                audio = AudioSegment.from_file(video_path)
-                if len(audio) > 0:
-                    audio.export(output_path, format="mp3", bitrate=quality)
-                    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                        logger.info(f"تم استخراج الصوت باستخدام pydub: {output_path}")
-                        return output_path
-            except Exception as e:
-                logger.error(f"فشل استخراج الصوت باستخدام pydub: {e}")
+            # ===== المحاولة 4: استخدام libav بدلاً من libmp3lame =====
+            cmd4 = [
+                "ffmpeg",
+                "-i", video_path,
+                "-vn",
+                "-acodec", "libavcodec",
+                "-ac", "2",
+                "-b:a", "128k",
+                "-ar", "44100",
+                "-f", "mp3",
+                "-y",
+                output_path
+            ]
             
-            logger.error(f"فشل استخراج الصوت من الفيديو: {stderr.decode() if stderr else 'خطأ غير معروف'}")
+            logger.info(f"المحاولة 4: {' '.join(cmd4)}")
+            
+            returncode4, stdout4, stderr4 = await self._run_ffmpeg(cmd4)
+            
+            if returncode4 == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                logger.info(f"تم استخراج الصوت بنجاح (باستخدام libav): {output_path}")
+                return output_path
+            
+            logger.warning(f"المحاولة 4 فشلت: {stderr4}")
+            
+            # ===== المحاولة 5: استخراج الصوت الخام =====
+            raw_audio = os.path.join(self.temp_dir, f"raw_audio_{timestamp}.pcm")
+            
+            cmd5 = [
+                "ffmpeg",
+                "-i", video_path,
+                "-vn",
+                "-acodec", "pcm_s16le",
+                "-ac", "2",
+                "-ar", "44100",
+                "-f", "s16le",
+                "-y",
+                raw_audio
+            ]
+            
+            logger.info(f"المحاولة 5: {' '.join(cmd5)}")
+            
+            returncode5, stdout5, stderr5 = await self._run_ffmpeg(cmd5)
+            
+            if returncode5 == 0 and os.path.exists(raw_audio) and os.path.getsize(raw_audio) > 0:
+                # تحويل الصوت الخام إلى MP3
+                cmd6 = [
+                    "ffmpeg",
+                    "-f", "s16le",
+                    "-ar", "44100",
+                    "-ac", "2",
+                    "-i", raw_audio,
+                    "-acodec", "libmp3lame",
+                    "-b:a", quality,
+                    "-y",
+                    output_path
+                ]
+                
+                logger.info(f"تحويل الصوت الخام: {' '.join(cmd6)}")
+                
+                returncode6, stdout6, stderr6 = await self._run_ffmpeg(cmd6)
+                
+                # تنظيف الصوت الخام
+                if os.path.exists(raw_audio):
+                    os.remove(raw_audio)
+                
+                if returncode6 == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    logger.info(f"تم استخراج الصوت بنجاح (من الصوت الخام): {output_path}")
+                    return output_path
+            
+            # ===== فشل كل المحاولات =====
+            logger.error("فشل استخراج الصوت من الفيديو بجميع المحاولات")
             
             if os.path.exists(output_path):
                 try:
@@ -474,10 +587,6 @@ class FileManager:
                 return '.jpg'
             elif 'image/png' in mime:
                 return '.png'
-            elif 'image/webp' in mime:
-                return '.webp'
-            elif 'image/gif' in mime:
-                return '.gif'
         
         if hasattr(file_obj, 'duration') and hasattr(file_obj, 'width') and hasattr(file_obj, 'height'):
             return '.mp4'
@@ -578,9 +687,16 @@ def add_file_record(user_id: int, title: str, artist: str, file_path: str = None
         if file_path and os.path.exists(file_path):
             file_size = os.path.getsize(file_path)
             try:
-                from mutagen.mp3 import MP3
-                audio = MP3(file_path)
-                duration = int(audio.info.length)
+                cmd = [
+                    "ffprobe",
+                    "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    file_path
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                if result.returncode == 0 and result.stdout.strip():
+                    duration = int(float(result.stdout.strip()))
             except:
                 pass
         
